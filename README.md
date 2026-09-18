@@ -46,6 +46,8 @@ Then open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported
 | MIDI input | Choose which device to listen to |
 | Tempo | Reference BPM used to quantize durations (and for playback / MP3) |
 | Tap tempo | Click the button (or press T) in time; the tempo updates live from the average of the current run, and a two-second pause starts a new run |
+| Auto tempo | Detects the tempo from your playing (the BPM at which the gaps between your notes best fit simple note values) and re-quantizes everything already written whenever the estimate changes; disables the tempo field, tap tempo, and metronome while on |
+| Metronome | Clicks on every beat at the set tempo, accented on beat 1; only available while auto tempo is off |
 | Time signature | Bar length used for measure breaks |
 | Live piano sound | Hear a sampled piano as you play |
 | Play / Stop | Play back the transcription; the notes light up as they sound |
@@ -60,7 +62,8 @@ Then open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported
 
 - The browser reads your keyboard through the Web MIDI API; the Node server just serves the page and the vendored libraries.
 - Notes played within 60 ms of each other are grouped into a chord.
-- Rhythm comes from the time between note onsets, snapped to the nearest value from whole to 16th (including dotted) at the tempo you set. A gap of at least an eighth note between releasing a key and pressing the next one becomes a rest; shorter gaps are treated as legato.
+- The raw performance (each chord's onset and release time) is kept, and the notation is derived from it, so changing the tempo — by typing, tapping, or auto tempo — re-quantizes everything already on the page.
+- Rhythm comes from the time between note onsets, snapped to the nearest value from whole to 16th (including dotted) at the current tempo. A gap of at least an eighth note between releasing a key and pressing the next one becomes a rest; shorter gaps are treated as legato.
 - Notes at or above middle C go on the treble staff; everything below goes on the bass staff. Notes that cross a barline are split and tied.
 - The log under the score shows, for every note, how long you actually held it versus how it was written, so you can see how far off the quantization was and adjust the tempo.
 - The last chord you play is finalized automatically after ~1 s of silence, or immediately with **Finalize current chord**.

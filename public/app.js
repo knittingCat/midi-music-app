@@ -27,10 +27,14 @@ const DURATIONS = [
 const MIN_BEATS = 0.25;
 const MAX_BEATS = 4;
 
-// events: { treble: [vexKeys], bass: [vexKeys], beats: number }; both empty = rest
+// performed: [{ onsetTime, releaseTime|null, notes: Map(pitch -> {vexKey, display}) }]
+// events (derived): { treble: [vexKeys], bass: [vexKeys], beats: number }; both empty = rest
+let performed = [];
 let events = [];
-let currentChord = null; // { onsetTime, notes: Map(pitch -> {vexKey, display}), released: Set, lastNoteOffTime, allReleased }
-let lastChordReleaseTime = null;
+let currentChord = null; // { onsetTime, notes, released: Set, lastNoteOffTime, allReleased }
+
+const autoTempoToggle = document.getElementById('autoTempo');
+const metronomeToggle = document.getElementById('metronome');
 
 function log(msg) {
   const line = `${new Date().toLocaleTimeString()}  ${msg}`;
@@ -94,39 +98,51 @@ function timingLabel(rawBeats, beats) {
   return `played ${(rawBeats * quarterMs()).toFixed(0)}ms = ${rawBeats.toFixed(2)} beats → ${beatsLabel(beats)} (${beats} beats, ${sign}${diff.toFixed(2)})`;
 }
 
-function pushRest(rawBeats) {
-  const beats = quantizeRestBeats(rawBeats);
-  if (beats < MIN_BEATS - EPS) return;
-  events.push({ treble: [], bass: [], beats });
-  log(`Rest: ${timingLabel(rawBeats, beats)}`);
-}
-
-function pushChord(chord, rawBeats) {
-  const beats = quantizeNoteBeats(rawBeats);
-  const { treble, bass } = splitChordByClef(chord.notes);
-  events.push({ treble, bass, beats });
-  const names = [...chord.notes.values()].map((n) => n.display).join(' ');
-  log(`${names}: ${timingLabel(rawBeats, beats)}`);
-  return beats;
-}
-
-function finalizeChord(chord, nextOnsetTime) {
+// Notation for one performed chord given when the next one started (null = last chord)
+function chordEvents(chord, nextOnsetTime) {
   const q = quarterMs();
-  const releaseTime = chord.allReleased ? chord.lastNoteOffTime : nextOnsetTime;
+  const { treble, bass } = splitChordByClef(chord.notes);
+  const out = [];
+  if (nextOnsetTime == null) {
+    const held = ((chord.releaseTime ?? chord.onsetTime + q) - chord.onsetTime) / q;
+    out.push({ treble, bass, beats: quantizeNoteBeats(held), rawBeats: held });
+    return out;
+  }
   const onsetToOnset = (nextOnsetTime - chord.onsetTime) / q;
+  const releaseTime = chord.releaseTime ?? nextOnsetTime;
   const gapBeats = (nextOnsetTime - releaseTime) / q;
-
   if (gapBeats >= REST_MIN_BEATS) {
-    const noteBeats = pushChord(chord, (releaseTime - chord.onsetTime) / q);
-    pushRest(onsetToOnset - noteBeats);
+    const held = (releaseTime - chord.onsetTime) / q;
+    const noteBeats = quantizeNoteBeats(held);
+    out.push({ treble, bass, beats: noteBeats, rawBeats: held });
+    const restRaw = onsetToOnset - noteBeats;
+    const restBeats = quantizeRestBeats(restRaw);
+    if (restBeats >= MIN_BEATS - EPS) out.push({ treble: [], bass: [], beats: restBeats, rawBeats: restRaw });
   } else {
-    pushChord(chord, onsetToOnset);
+    out.push({ treble, bass, beats: quantizeNoteBeats(onsetToOnset), rawBeats: onsetToOnset });
+  }
+  return out;
+}
+
+function rebuildEvents() {
+  events = performed.flatMap((chord, i) => chordEvents(chord, performed[i + 1]?.onsetTime ?? null));
+}
+
+function logChord(chord, nextOnsetTime) {
+  const names = [...chord.notes.values()].map((n) => n.display).join(' ');
+  for (const ev of chordEvents(chord, nextOnsetTime)) {
+    const isRest = ev.treble.length === 0 && ev.bass.length === 0;
+    log(`${isRest ? 'Rest' : names}: ${timingLabel(ev.rawBeats, ev.beats)}`);
   }
 }
 
-function finalizeHeldChord(chord) {
-  pushChord(chord, (chord.lastNoteOffTime - chord.onsetTime) / quarterMs());
-  lastChordReleaseTime = chord.lastNoteOffTime;
+function commitChord(chord, releaseTime) {
+  const prev = performed[performed.length - 1];
+  performed.push({ onsetTime: chord.onsetTime, releaseTime, notes: chord.notes });
+  if (prev) logChord(prev, chord.onsetTime);
+  if (releaseTime != null) logChord(performed[performed.length - 1], null);
+  if (autoTempoToggle.checked) applyAutoTempo();
+  rebuildEvents();
 }
 
 function onNoteOn(pitch) {
@@ -139,10 +155,7 @@ function onNoteOn(pitch) {
   }
 
   if (currentChord) {
-    finalizeChord(currentChord, now);
-  } else if (lastChordReleaseTime != null) {
-    const gapBeats = (now - lastChordReleaseTime) / quarterMs();
-    if (gapBeats >= REST_MIN_BEATS) pushRest(gapBeats);
+    commitChord(currentChord, currentChord.allReleased ? currentChord.lastNoteOffTime : null);
   }
 
   currentChord = {
@@ -164,34 +177,147 @@ function onNoteOff(pitch) {
   }
 }
 
+function flushCurrentChord() {
+  if (!currentChord) return;
+  if (!currentChord.allReleased) currentChord.lastNoteOffTime = performance.now();
+  commitChord(currentChord, currentChord.lastNoteOffTime);
+  currentChord = null;
+  render();
+}
+
 function idleFlushCheck() {
   if (!currentChord || !currentChord.allReleased) return;
-  if (performance.now() - currentChord.lastNoteOffTime > IDLE_FLUSH_MS) {
-    finalizeHeldChord(currentChord);
-    currentChord = null;
-    render();
-  }
+  if (performance.now() - currentChord.lastNoteOffTime > IDLE_FLUSH_MS) flushCurrentChord();
 }
 setInterval(idleFlushCheck, 250);
 
-document.getElementById('finalizeBtn').addEventListener('click', () => {
-  if (!currentChord) return;
-  if (!currentChord.allReleased) currentChord.lastNoteOffTime = performance.now();
-  finalizeHeldChord(currentChord);
-  currentChord = null;
-  render();
-});
+document.getElementById('finalizeBtn').addEventListener('click', flushCurrentChord);
 
 document.getElementById('clearBtn').addEventListener('click', () => {
   stopPlayback();
+  performed = [];
   events = [];
   currentChord = null;
-  lastChordReleaseTime = null;
   log('Cleared session.');
   render();
 });
 
 timeSigSelect.addEventListener('change', render);
+
+function requantize() {
+  rebuildEvents();
+  render();
+}
+tempoInput.addEventListener('change', requantize);
+
+// ---------- Auto tempo ----------
+
+const TEMPO_MIN = 40;
+const TEMPO_MAX = 220;
+const IOI_RATIOS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
+const IOI_RATIO_PENALTY = { 0.25: 0.35, 0.5: 0.1, 0.75: 0.25, 1: 0, 1.5: 0.2, 2: 0.1, 3: 0.3, 4: 0.3 };
+const PAUSE_MS = 3000;
+const MIN_IOIS_FOR_AUTO = 4;
+
+// Picks the BPM at which the inter-onset intervals best fit simple note values
+function estimateTempo(iois) {
+  let best = null;
+  let bestCost = Infinity;
+  for (let bpm = TEMPO_MIN; bpm <= TEMPO_MAX; bpm++) {
+    const beat = 60000 / bpm;
+    let cost = 0.15 * Math.abs(Math.log2(bpm / 100)) * iois.length;
+    for (const ioi of iois) {
+      const r = ioi / beat;
+      let c = Infinity;
+      for (const ratio of IOI_RATIOS) {
+        const e = Math.log2(r / ratio);
+        const v = e * e * 8 + IOI_RATIO_PENALTY[ratio];
+        if (v < c) c = v;
+      }
+      cost += c;
+    }
+    if (cost < bestCost) { bestCost = cost; best = bpm; }
+  }
+  return best;
+}
+
+function performedIois() {
+  const iois = [];
+  for (let i = 1; i < performed.length; i++) {
+    const ioi = performed[i].onsetTime - performed[i - 1].onsetTime;
+    if (ioi < PAUSE_MS) iois.push(ioi);
+  }
+  return iois;
+}
+
+function applyAutoTempo() {
+  const iois = performedIois();
+  if (iois.length < MIN_IOIS_FOR_AUTO) return;
+  const bpm = estimateTempo(iois);
+  if (bpm === Number(tempoInput.value)) return;
+  tempoInput.value = bpm;
+  log(`Auto tempo: ${bpm} BPM — re-quantized ${performed.length} chord${performed.length === 1 ? '' : 's'}.`);
+}
+
+function syncTempoControls() {
+  const auto = autoTempoToggle.checked;
+  tempoInput.disabled = auto;
+  tapTempoBtn.disabled = auto;
+  metronomeToggle.disabled = auto;
+  if (auto) {
+    metronomeToggle.checked = false;
+    stopMetronome();
+    applyAutoTempo();
+    requantize();
+  }
+}
+autoTempoToggle.addEventListener('change', syncTempoControls);
+
+// ---------- Metronome ----------
+
+const METRONOME_LOOKAHEAD_SEC = 0.1;
+let metronomeTimer = null;
+let metronomeNextBeat = 0;
+let metronomeBeatIndex = 0;
+
+function clickAt(time, accent) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.frequency.value = accent ? 1600 : 1000;
+  gain.gain.setValueAtTime(accent ? 0.5 : 0.3, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.04);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(time);
+  osc.stop(time + 0.05);
+}
+
+function metronomeTick() {
+  const [num, den] = timeSigSelect.value.split('/').map(Number);
+  const beatSec = (quarterMs() / 1000) * (4 / den);
+  while (metronomeNextBeat < audioCtx.currentTime + METRONOME_LOOKAHEAD_SEC) {
+    clickAt(metronomeNextBeat, metronomeBeatIndex % num === 0);
+    metronomeNextBeat += beatSec;
+    metronomeBeatIndex++;
+  }
+}
+
+function startMetronome() {
+  unlockAudio();
+  metronomeNextBeat = audioCtx.currentTime + 0.05;
+  metronomeBeatIndex = 0;
+  metronomeTick();
+  metronomeTimer = setInterval(metronomeTick, 25);
+}
+
+function stopMetronome() {
+  clearInterval(metronomeTimer);
+  metronomeTimer = null;
+}
+
+metronomeToggle.addEventListener('change', () => {
+  if (metronomeToggle.checked) startMetronome();
+  else stopMetronome();
+});
 
 // ---------- Measures ----------
 
@@ -384,10 +510,12 @@ function tapTempo() {
   const bpm = Math.min(300, Math.max(20, Math.round(60000 / avgMs)));
   tempoInput.value = bpm;
   tapTempoBtn.textContent = `${bpm} BPM`;
+  requantize();
 }
 
 tapTempoBtn.addEventListener('click', tapTempo);
 document.addEventListener('keydown', (e) => {
+  if (tapTempoBtn.disabled) return;
   if (e.key.toLowerCase() === 't' && !e.metaKey && !e.ctrlKey && !e.altKey && e.target.tagName !== 'INPUT') {
     e.preventDefault();
     tapTempo();
