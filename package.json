@@ -3,13 +3,13 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "vendor": "cp node_modules/vexflow/build/cjs/vexflow.js node_modules/midi-writer-js/browser/midiwriter.js node_modules/lamejs/lame.min.js public/vendor/"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "Listens to a MIDI keyboard and transcribes what you play into live sheet music, with MusicXML and MIDI export",
+  "description": "Listens to a MIDI keyboard and transcribes what you play into live sheet music, with MusicXML, MIDI, PDF and MP3 export. Static site; server.js is only a local launcher.",
   "dependencies": {
     "express": "^5.2.1",
     "lamejs": "^1.2.1",

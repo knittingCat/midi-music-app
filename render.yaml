@@ -1,0 +1,10 @@
+# Render blueprint: deploys public/ as a static site (no build step).
+services:
+  - type: web
+    name: midi-music-app
+    runtime: static
+    staticPublishPath: ./public
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: no-cache

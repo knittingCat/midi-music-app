@@ -2,7 +2,13 @@
 
 Plug in a MIDI keyboard, play, and watch your notes appear as sheet music on a grand staff in real time, with a sampled piano sounding as you play. Play it back with the notes highlighted as they sound, and save the result as MusicXML, MIDI, PDF, or MP3.
 
-## Install
+The whole app runs in the browser: `public/` is a self-contained static site (page, script, and vendored libraries), so it can be hosted anywhere static files can, or run locally through the small Node launcher.
+
+## Hosted (static site)
+
+Deploy the `public/` directory as a static site — no build step. `render.yaml` in the repo is a [Render](https://render.com) blueprint that does exactly that (publish directory `./public`); creating a Static Site by hand with publish directory `public` and an empty build command works too. Web MIDI needs a secure context, which any `https://` host provides.
+
+## Run locally
 
 ### With tlib (recommended)
 
@@ -22,7 +28,7 @@ See [Bluegrayfoo/TLIB](https://github.com/Bluegrayfoo/TLIB) for TLIB itself.
 
 ### Without tlib
 
-Requires [Node.js](https://nodejs.org) 18 or newer.
+Requires [Node.js](https://nodejs.org) 18 or newer (only for the launcher; express is its one runtime dependency).
 
 ```bash
 git clone https://github.com/knittingCat/midi-music-app.git
@@ -30,7 +36,7 @@ cd midi-music-app
 npm install
 ```
 
-## Run
+### Start / stop
 
 | | Start | Stop |
 |---|---|---|
@@ -61,7 +67,9 @@ Then open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported
 
 ## How it works
 
-- The browser reads your keyboard through the Web MIDI API; the Node server just serves the page and the vendored libraries.
+- The browser reads your keyboard through the Web MIDI API; nothing runs server-side. The Node launcher just serves `public/`.
+- Runs of three or more evenly spaced notes that fit eighth- or quarter-note triplets better than any straight value are written as triplets; a triplet group never crosses a barline.
+- Each row of the score is rendered separately and cached, so a new note only redraws the row it lands in.
 - Notes struck within 75 ms are one chord. Beyond that, a note still joins the chord if the earlier notes are being held when it arrives (within 160 ms) and stay held at least 150 ms longer, so rolled or slightly uneven chords group correctly while trills and runs, which let go of each note as the next starts, stay separate. Grouping is re-derived from the raw notes, so it can settle once the keys come up.
 - The raw performance (each chord's onset and release time) is kept, and the notation is derived from it, so changing the tempo — by typing, tapping, or auto tempo — re-quantizes everything already on the page.
 - Rhythm comes from the time between chord onsets, snapped to the nearest value from whole to 16th at the current tempo. A run of notes whose spacing stays close to the run's average shares one value rather than flickering between eighths and sixteenths (so a slightly swung trill is still written evenly), and a dotted eighth is only written when it's paired with a sixteenth. A gap of at least an eighth note between releasing a key and pressing the next one becomes a rest; shorter gaps are treated as legato.
@@ -70,6 +78,8 @@ Then open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported
 - The last chord appears as soon as all its keys are released.
 
 ## Credits
+
+Libraries are vendored in `public/vendor/` (refresh them from `node_modules` with `npm run vendor` after `npm update`):
 
 - Notation: [VexFlow](https://github.com/vexflow/vexflow) (MIT)
 - MIDI file writing: [midi-writer-js](https://github.com/grimmdude/MidiWriterJS) (MIT)
