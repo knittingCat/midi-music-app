@@ -15,8 +15,8 @@ fi
 
 STOPPED=0
 for PID in $(lsof -ti "tcp:$PORT_RANGE" -sTCP:LISTEN 2>/dev/null | sort -u); do
-  if lsof -p "$PID" -Fn 2>/dev/null | grep -q 'midi-music-app'; then
-    PORT=$(lsof -a -p "$PID" -iTCP -sTCP:LISTEN -Fn 2>/dev/null | grep -o ':[0-9]*$' | head -1 | tr -d ':')
+  if ps -o command= -p "$PID" | grep -qi 'midi-music-app' || lsof -p "$PID" -Fn 2>/dev/null | grep -qi 'midi-music-app'; then
+    PORT=$(lsof -a -nP -p "$PID" -iTCP -sTCP:LISTEN -Fn 2>/dev/null | grep -o ':[0-9]*$' | head -1 | tr -d ':')
     kill "$PID"
     echo "Stopped midi-music-app on port ${PORT:-?} (pid $PID)"
     STOPPED=1
