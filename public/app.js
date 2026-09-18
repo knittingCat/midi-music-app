@@ -8,23 +8,29 @@ const logEl = document.getElementById('log');
 const notationEl = document.getElementById('notation');
 
 const CHORD_WINDOW_MS = 60;
-const REST_THRESHOLD_MS = 120;
 const IDLE_FLUSH_MS = 900;
+const REST_MIN_BEATS = 0.5;
+const EPS = 1e-6;
 
 const NOTE_NAMES = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b'];
-const DURATION_CANDIDATES = [
-  { beats: 4, code: 'w' },
-  { beats: 2, code: 'h' },
-  { beats: 1, code: 'q' },
-  { beats: 0.5, code: '8' },
-  { beats: 0.25, code: '16' },
+const DURATIONS = [
+  { beats: 4, code: 'w', dotted: false },
+  { beats: 3, code: 'h', dotted: true },
+  { beats: 2, code: 'h', dotted: false },
+  { beats: 1.5, code: 'q', dotted: true },
+  { beats: 1, code: 'q', dotted: false },
+  { beats: 0.75, code: '8', dotted: true },
+  { beats: 0.5, code: '8', dotted: false },
+  { beats: 0.375, code: '16', dotted: true },
+  { beats: 0.25, code: '16', dotted: false },
 ];
+const MIN_BEATS = 0.25;
+const MAX_BEATS = 4;
 
-// finalized events: { treble: [keys]|[], bass: [keys]|[], duration: 'w'|'h'|'q'|'8'|'16' }
+// events: { treble: [vexKeys], bass: [vexKeys], beats: number }; both empty = rest
 let events = [];
-let currentChord = null; // { onsetTime, notes: Map(pitch -> name), lastNoteOffTime, allReleased }
+let currentChord = null; // { onsetTime, notes: Map(pitch -> {vexKey, display}), released: Set, lastNoteOffTime, allReleased }
 let lastChordReleaseTime = null;
-let idleCheckTimer = null;
 
 function log(msg) {
   const line = `${new Date().toLocaleTimeString()}  ${msg}`;
@@ -37,20 +43,40 @@ function midiToKey(pitch) {
   return { vexKey: `${name}/${octave}`, display: `${name.toUpperCase()}${octave}` };
 }
 
-function quantizeToDuration(ms, tempoBpm) {
-  const quarterMs = 60000 / tempoBpm;
-  const ratio = Math.max(ms / quarterMs, 0.125);
-  let best = DURATION_CANDIDATES[0];
+function quarterMs() {
+  return 60000 / (Number(tempoInput.value) || 120);
+}
+
+function quantizeNoteBeats(rawBeats) {
+  const ratio = Math.min(Math.max(rawBeats, MIN_BEATS), MAX_BEATS);
+  let best = DURATIONS[0];
   let bestDist = Infinity;
-  for (const cand of DURATION_CANDIDATES) {
+  for (const cand of DURATIONS) {
+    if (cand.dotted && cand.beats < 0.5) continue;
     const dist = Math.abs(Math.log2(ratio) - Math.log2(cand.beats));
     if (dist < bestDist) { bestDist = dist; best = cand; }
   }
-  return best.code;
+  return best.beats;
 }
 
-function durationBeats(code) {
-  return DURATION_CANDIDATES.find((c) => c.code === code).beats;
+function quantizeRestBeats(rawBeats) {
+  return Math.min(Math.round(rawBeats / MIN_BEATS) * MIN_BEATS, MAX_BEATS);
+}
+
+function decomposeBeats(beats) {
+  const parts = [];
+  let remaining = beats;
+  for (const d of DURATIONS) {
+    while (remaining >= d.beats - EPS) {
+      parts.push(d);
+      remaining -= d.beats;
+    }
+  }
+  return parts;
+}
+
+function beatsLabel(beats) {
+  return decomposeBeats(beats).map((d) => d.code + (d.dotted ? '.' : '')).join('+');
 }
 
 function splitChordByClef(notesMap) {
@@ -62,45 +88,60 @@ function splitChordByClef(notesMap) {
   return { treble, bass };
 }
 
-function pushRestEvent(gapMs) {
-  const tempo = Number(tempoInput.value) || 120;
-  const code = quantizeToDuration(gapMs, tempo);
-  events.push({ treble: [], bass: [], duration: code });
+function pushRest(beats) {
+  if (beats < MIN_BEATS - EPS) return;
+  events.push({ treble: [], bass: [], beats });
+  log(`Rest (${beatsLabel(beats)})`);
 }
 
-function finalizeChord(chord, durationMs) {
-  const tempo = Number(tempoInput.value) || 120;
-  const code = quantizeToDuration(durationMs, tempo);
+function pushChord(chord, beats) {
   const { treble, bass } = splitChordByClef(chord.notes);
-  events.push({ treble, bass, duration: code });
+  events.push({ treble, bass, beats });
   const names = [...chord.notes.values()].map((n) => n.display).join(' ');
-  log(`Note(s): ${names}  (${code})`);
+  log(`Note(s): ${names}  (${beatsLabel(beats)})`);
 }
 
-function onNoteOn(pitch, velocity) {
+function finalizeChord(chord, nextOnsetTime) {
+  const q = quarterMs();
+  const releaseTime = chord.allReleased ? chord.lastNoteOffTime : nextOnsetTime;
+  const onsetToOnset = (nextOnsetTime - chord.onsetTime) / q;
+  const gapBeats = (nextOnsetTime - releaseTime) / q;
+
+  if (gapBeats >= REST_MIN_BEATS) {
+    const noteBeats = quantizeNoteBeats((releaseTime - chord.onsetTime) / q);
+    pushChord(chord, noteBeats);
+    pushRest(quantizeRestBeats(onsetToOnset - noteBeats));
+  } else {
+    pushChord(chord, quantizeNoteBeats(onsetToOnset));
+  }
+}
+
+function finalizeHeldChord(chord) {
+  const heldMs = chord.lastNoteOffTime - chord.onsetTime;
+  pushChord(chord, quantizeNoteBeats(heldMs / quarterMs()));
+  lastChordReleaseTime = chord.lastNoteOffTime;
+}
+
+function onNoteOn(pitch) {
   const now = performance.now();
   const { vexKey, display } = midiToKey(pitch);
 
   if (currentChord && !currentChord.allReleased && now - currentChord.onsetTime <= CHORD_WINDOW_MS) {
     currentChord.notes.set(pitch, { vexKey, display });
-    render();
     return;
   }
 
   if (currentChord) {
-    finalizeChord(currentChord, now - currentChord.onsetTime);
-    lastChordReleaseTime = currentChord.lastNoteOffTime || now;
-  }
-
-  const gapStart = lastChordReleaseTime;
-  if (gapStart != null) {
-    const gap = now - gapStart;
-    if (gap > REST_THRESHOLD_MS) pushRestEvent(gap);
+    finalizeChord(currentChord, now);
+  } else if (lastChordReleaseTime != null) {
+    const gapBeats = (now - lastChordReleaseTime) / quarterMs();
+    if (gapBeats >= REST_MIN_BEATS) pushRest(quantizeRestBeats(gapBeats));
   }
 
   currentChord = {
     onsetTime: now,
     notes: new Map([[pitch, { vexKey, display }]]),
+    released: new Set(),
     lastNoteOffTime: null,
     allReleased: false,
   };
@@ -109,34 +150,27 @@ function onNoteOn(pitch, velocity) {
 
 function onNoteOff(pitch) {
   if (!currentChord || !currentChord.notes.has(pitch)) return;
-  const now = performance.now();
-  currentChord.lastNoteOffTime = now;
-  const remaining = [...currentChord.notes.keys()];
-  currentChord._released = currentChord._released || new Set();
-  currentChord._released.add(pitch);
-  if (remaining.every((p) => currentChord._released.has(p))) {
+  currentChord.lastNoteOffTime = performance.now();
+  currentChord.released.add(pitch);
+  if ([...currentChord.notes.keys()].every((p) => currentChord.released.has(p))) {
     currentChord.allReleased = true;
   }
 }
 
 function idleFlushCheck() {
   if (!currentChord || !currentChord.allReleased) return;
-  const now = performance.now();
-  if (now - currentChord.lastNoteOffTime > IDLE_FLUSH_MS) {
-    const durationMs = currentChord.lastNoteOffTime - currentChord.onsetTime;
-    finalizeChord(currentChord, durationMs);
-    lastChordReleaseTime = currentChord.lastNoteOffTime;
+  if (performance.now() - currentChord.lastNoteOffTime > IDLE_FLUSH_MS) {
+    finalizeHeldChord(currentChord);
     currentChord = null;
     render();
   }
 }
-idleCheckTimer = setInterval(idleFlushCheck, 250);
+setInterval(idleFlushCheck, 250);
 
 document.getElementById('finalizeBtn').addEventListener('click', () => {
   if (!currentChord) return;
-  const now = performance.now();
-  finalizeChord(currentChord, now - currentChord.onsetTime);
-  lastChordReleaseTime = currentChord.lastNoteOffTime || now;
+  if (!currentChord.allReleased) currentChord.lastNoteOffTime = performance.now();
+  finalizeHeldChord(currentChord);
   currentChord = null;
   render();
 });
@@ -150,39 +184,80 @@ document.getElementById('clearBtn').addEventListener('click', () => {
   render();
 });
 
-// ---------- Rendering ----------
+timeSigSelect.addEventListener('change', render);
+
+// ---------- Measures ----------
 
 function timeSigBeatsInQuarters() {
   const [num, den] = timeSigSelect.value.split('/').map(Number);
   return num * (4 / den);
 }
 
+// slot: { treble, bass, code, dotted, tieToNext }
 function groupIntoMeasures() {
-  const measureCapacity = timeSigBeatsInQuarters();
+  const capacity = timeSigBeatsInQuarters();
   const measures = [];
   let current = [];
   let acc = 0;
+
   for (const ev of events) {
-    current.push(ev);
-    acc += durationBeats(ev.duration);
-    if (acc >= measureCapacity - 1e-6) {
-      measures.push(current);
-      current = [];
-      acc = 0;
+    const isRest = ev.treble.length === 0 && ev.bass.length === 0;
+    let remaining = ev.beats;
+    while (remaining > EPS) {
+      const chunk = Math.min(remaining, capacity - acc);
+      const parts = decomposeBeats(chunk);
+      const lastChunk = remaining - chunk <= EPS;
+      parts.forEach((p, i) => {
+        const lastPart = lastChunk && i === parts.length - 1;
+        current.push({ treble: ev.treble, bass: ev.bass, code: p.code, dotted: p.dotted, tieToNext: !isRest && !lastPart });
+      });
+      acc += chunk;
+      remaining -= chunk;
+      if (acc >= capacity - EPS) {
+        measures.push(current);
+        current = [];
+        acc = 0;
+      }
     }
   }
   if (current.length) measures.push(current);
   return measures;
 }
 
-function buildStaveNotes(measureEvents, clef) {
-  return measureEvents.map((ev) => {
-    const keys = ev[clef];
-    if (keys.length === 0) {
-      return new VF.StaveNote({ keys: [clef === 'treble' ? 'b/4' : 'd/3'], duration: ev.duration + 'r' });
-    }
-    return new VF.StaveNote({ keys, duration: ev.duration, clef });
+// ---------- Rendering ----------
+
+function buildStaveNotes(slots, clef) {
+  return slots.map((slot) => {
+    const keys = slot[clef];
+    const duration = slot.code + (slot.dotted ? 'd' : '');
+    const note = keys.length === 0
+      ? new VF.StaveNote({ keys: [clef === 'treble' ? 'b/4' : 'd/3'], duration: duration + 'r', clef })
+      : new VF.StaveNote({ keys, duration, clef });
+    if (slot.dotted) VF.Dot.buildAndAttach([note], { all: true });
+    return note;
   });
+}
+
+function layoutMeasures(measures) {
+  const rowMaxWidth = Math.max(600, notationEl.parentElement.clientWidth - 40);
+  const rows = [];
+  let row = [];
+  let x = 0;
+  measures.forEach((slots, i) => {
+    const base = Math.max(120, 50 + slots.length * 36);
+    const startOfRow = row.length === 0;
+    let width = startOfRow ? base + 70 + (i === 0 ? 30 : 0) : base;
+    if (!startOfRow && x + width > rowMaxWidth) {
+      rows.push(row);
+      row = [];
+      x = 0;
+      width = base + 70;
+    }
+    row.push({ slots, width, index: i, firstInRow: row.length === 0 });
+    x += width;
+  });
+  if (row.length) rows.push(row);
+  return rows;
 }
 
 function render() {
@@ -190,52 +265,78 @@ function render() {
   const measures = groupIntoMeasures();
   if (measures.length === 0) return;
 
-  const MEASURES_PER_ROW = 4;
-  const MEASURE_WIDTH = 220;
-  const ROW_HEIGHT = 200;
-  const rows = Math.ceil(measures.length / MEASURES_PER_ROW);
-  const width = Math.min(measures.length, MEASURES_PER_ROW) * MEASURE_WIDTH + 40;
-  const height = rows * ROW_HEIGHT + 40;
+  const ROW_HEIGHT = 210;
+  const rows = layoutMeasures(measures);
+  const width = Math.max(...rows.map((r) => r.reduce((s, m) => s + m.width, 0))) + 40;
+  const height = rows.length * ROW_HEIGHT + 30;
 
   const renderer = new VF.Renderer(notationEl, VF.Renderer.Backends.SVG);
   renderer.resize(width, height);
   const ctx = renderer.getContext();
+  const [num, den] = timeSigSelect.value.split('/').map(Number);
 
-  measures.forEach((measureEvents, i) => {
-    const col = i % MEASURES_PER_ROW;
-    const row = Math.floor(i / MEASURES_PER_ROW);
-    const x = 20 + col * MEASURE_WIDTH;
-    const y = 20 + row * ROW_HEIGHT;
-    const w = MEASURE_WIDTH - (col === MEASURES_PER_ROW - 1 ? 20 : 0);
+  const pendingTie = { treble: null, bass: null };
 
-    const trebleStave = new VF.Stave(x, y, w);
-    const bassStave = new VF.Stave(x, y + 90, w);
-    if (col === 0) {
-      trebleStave.addClef('treble');
-      bassStave.addClef('bass');
-      if (i === 0) {
-        trebleStave.addTimeSignature(timeSigSelect.value);
-        bassStave.addTimeSignature(timeSigSelect.value);
+  rows.forEach((row, rowIdx) => {
+    let x = 20;
+    const y = 20 + rowIdx * ROW_HEIGHT;
+
+    row.forEach((m) => {
+      const trebleStave = new VF.Stave(x, y, m.width);
+      const bassStave = new VF.Stave(x, y + 95, m.width);
+      if (m.firstInRow) {
+        trebleStave.addClef('treble');
+        bassStave.addClef('bass');
+        if (m.index === 0) {
+          trebleStave.addTimeSignature(timeSigSelect.value);
+          bassStave.addTimeSignature(timeSigSelect.value);
+        }
       }
-    }
-    trebleStave.setContext(ctx).draw();
-    bassStave.setContext(ctx).draw();
-    new VF.StaveConnector(trebleStave, bassStave).setType('brace').setContext(ctx).draw();
-    new VF.StaveConnector(trebleStave, bassStave).setType('singleLeft').setContext(ctx).draw();
+      trebleStave.setContext(ctx).draw();
+      bassStave.setContext(ctx).draw();
+      new VF.StaveConnector(trebleStave, bassStave).setType('brace').setContext(ctx).draw();
+      new VF.StaveConnector(trebleStave, bassStave).setType('singleLeft').setContext(ctx).draw();
 
-    const trebleNotes = buildStaveNotes(measureEvents, 'treble');
-    const bassNotes = buildStaveNotes(measureEvents, 'bass');
+      const notes = {
+        treble: buildStaveNotes(m.slots, 'treble'),
+        bass: buildStaveNotes(m.slots, 'bass'),
+      };
+      const beams = {
+        treble: VF.Beam.generateBeams(notes.treble),
+        bass: VF.Beam.generateBeams(notes.bass),
+      };
+      const voices = {
+        treble: new VF.Voice({ numBeats: num, beatValue: den }).setStrict(false).addTickables(notes.treble),
+        bass: new VF.Voice({ numBeats: num, beatValue: den }).setStrict(false).addTickables(notes.bass),
+      };
 
-    const [num, den] = timeSigSelect.value.split('/').map(Number);
-    const trebleVoice = new VF.Voice({ numBeats: num, beatValue: den }).setStrict(false);
-    trebleVoice.addTickables(trebleNotes);
-    const bassVoice = new VF.Voice({ numBeats: num, beatValue: den }).setStrict(false);
-    bassVoice.addTickables(bassNotes);
+      new VF.Formatter().joinVoices([voices.treble]).joinVoices([voices.bass]).formatToStave([voices.treble, voices.bass], trebleStave);
+      voices.treble.draw(ctx, trebleStave);
+      voices.bass.draw(ctx, bassStave);
+      beams.treble.forEach((b) => b.setContext(ctx).draw());
+      beams.bass.forEach((b) => b.setContext(ctx).draw());
 
-    new VF.Formatter().joinVoices([trebleVoice]).format([trebleVoice], w - 50);
-    new VF.Formatter().joinVoices([bassVoice]).format([bassVoice], w - 50);
-    trebleVoice.draw(ctx, trebleStave);
-    bassVoice.draw(ctx, bassStave);
+      ['treble', 'bass'].forEach((clef) => {
+        m.slots.forEach((slot, i) => {
+          if (slot[clef].length === 0) return;
+          const indexes = slot[clef].map((_, k) => k);
+          const note = notes[clef][i];
+          if (i === 0 && pendingTie[clef]) {
+            new VF.StaveTie({ lastNote: note, firstIndexes: indexes, lastIndexes: indexes }).setContext(ctx).draw();
+            pendingTie[clef] = null;
+          }
+          if (!slot.tieToNext) return;
+          if (i < m.slots.length - 1) {
+            new VF.StaveTie({ firstNote: note, lastNote: notes[clef][i + 1], firstIndexes: indexes, lastIndexes: indexes }).setContext(ctx).draw();
+          } else {
+            new VF.StaveTie({ firstNote: note, firstIndexes: indexes, lastIndexes: indexes }).setContext(ctx).draw();
+            pendingTie[clef] = note;
+          }
+        });
+      });
+
+      x += m.width;
+    });
   });
 }
 
@@ -252,7 +353,7 @@ function attachInput(input) {
     const command = status & 0xf0;
     if (command === 0x90 && data2 > 0) {
       liveNoteOn(data1, data2);
-      onNoteOn(data1, data2);
+      onNoteOn(data1);
     } else if (command === 0x80 || (command === 0x90 && data2 === 0)) {
       liveNoteOff(data1);
       onNoteOff(data1);
@@ -278,7 +379,7 @@ function populateDevices(midiAccess) {
     setStatus('No MIDI devices found. Plug in your keyboard and reload.', 'error');
     return;
   }
-  inputs.forEach((input, i) => {
+  inputs.forEach((input) => {
     const opt = document.createElement('option');
     opt.value = input.id;
     opt.textContent = input.name;
@@ -393,8 +494,7 @@ function stopPlayback() {
 }
 
 async function startPlayback() {
-  const tempo = Number(tempoInput.value) || 120;
-  const quarterSec = 60 / tempo;
+  const quarterSec = quarterMs() / 1000;
   if (audioCtx.state === 'suspended') await audioCtx.resume();
 
   isPlaying = true;
@@ -406,7 +506,7 @@ async function startPlayback() {
 
   let t = audioCtx.currentTime + 0.05;
   for (const ev of events) {
-    const durationSec = durationBeats(ev.duration) * quarterSec;
+    const durationSec = ev.beats * quarterSec;
     for (const key of [...ev.treble, ...ev.bass]) {
       const buffer = sampleCache.get(vexKeyToSampleName(key));
       if (buffer) scheduleSample(audioCtx, buffer, t, durationSec);
@@ -424,47 +524,55 @@ playBtn.addEventListener('click', () => {
 
 // ---------- Export: MusicXML ----------
 
-function durationToXmlType(code) {
-  return { w: 'whole', h: 'half', q: 'quarter', 8: 'eighth', 16: '16th' }[code];
+const XML_DIVISIONS = 8;
+const XML_TYPES = { w: 'whole', h: 'half', q: 'quarter', 8: 'eighth', 16: '16th' };
+
+function slotDivisions(slot) {
+  const base = DURATIONS.find((d) => d.code === slot.code && !d.dotted).beats;
+  return Math.round(base * (slot.dotted ? 1.5 : 1) * XML_DIVISIONS);
 }
-function durationToDivisions(code) {
-  return { w: 16, h: 8, q: 4, 8: 2, 16: 1 }[code];
-}
+
 function vexKeyToPitch(vexKey) {
   const [name, octave] = vexKey.split('/');
-  const step = name[0].toUpperCase();
-  const alter = name.includes('#') ? 1 : 0;
-  return { step, alter, octave };
+  return { step: name[0].toUpperCase(), alter: name.includes('#') ? 1 : 0, octave };
 }
 
 function buildMusicXml() {
   const measures = groupIntoMeasures();
   const [num, den] = timeSigSelect.value.split('/').map(Number);
+  const tieOpen = { treble: false, bass: false };
   let measuresXml = '';
 
-  measures.forEach((measureEvents, mi) => {
+  measures.forEach((slots, mi) => {
     let noteXml = '';
     const attrs = mi === 0
-      ? `<attributes><divisions>4</divisions><time><beats>${num}</beats><beat-type>${den}</beat-type></time><staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes>`
+      ? `<attributes><divisions>${XML_DIVISIONS}</divisions><time><beats>${num}</beats><beat-type>${den}</beat-type></time><staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes>`
       : '';
 
     ['treble', 'bass'].forEach((clef, clefIdx) => {
       const staffNum = clefIdx + 1;
-      const voiceNum = staffNum;
-      measureEvents.forEach((ev) => {
-        const keys = ev[clef];
-        const type = durationToXmlType(ev.duration);
-        const dur = durationToDivisions(ev.duration);
+      slots.forEach((slot) => {
+        const keys = slot[clef];
+        const type = XML_TYPES[slot.code];
+        const dur = slotDivisions(slot);
+        const dot = slot.dotted ? '<dot/>' : '';
         if (keys.length === 0) {
-          noteXml += `<note><rest/><duration>${dur}</duration><voice>${voiceNum}</voice><type>${type}</type><staff>${staffNum}</staff></note>`;
-        } else {
-          keys.forEach((k, idx) => {
-            const { step, alter, octave } = vexKeyToPitch(k);
-            noteXml += `<note>${idx > 0 ? '<chord/>' : ''}<pitch><step>${step}</step>${alter ? `<alter>${alter}</alter>` : ''}<octave>${octave}</octave></pitch><duration>${dur}</duration><voice>${voiceNum}</voice><type>${type}</type><staff>${staffNum}</staff></note>`;
-          });
+          noteXml += `<note><rest/><duration>${dur}</duration><voice>${staffNum}</voice><type>${type}</type>${dot}<staff>${staffNum}</staff></note>`;
+          return;
         }
+        const tieStop = tieOpen[clef];
+        const tieStart = slot.tieToNext;
+        const tieTags = (tieStop ? '<tie type="stop"/>' : '') + (tieStart ? '<tie type="start"/>' : '');
+        const tiedTags = (tieStop || tieStart)
+          ? `<notations>${tieStop ? '<tied type="stop"/>' : ''}${tieStart ? '<tied type="start"/>' : ''}</notations>`
+          : '';
+        keys.forEach((k, idx) => {
+          const { step, alter, octave } = vexKeyToPitch(k);
+          noteXml += `<note>${idx > 0 ? '<chord/>' : ''}<pitch><step>${step}</step>${alter ? `<alter>${alter}</alter>` : ''}<octave>${octave}</octave></pitch><duration>${dur}</duration>${tieTags}<voice>${staffNum}</voice><type>${type}</type>${dot}<staff>${staffNum}</staff>${tiedTags}</note>`;
+        });
+        tieOpen[clef] = tieStart;
       });
-      if (clefIdx === 0) noteXml += `<backup><duration>${measureEvents.reduce((s, ev) => s + durationToDivisions(ev.duration), 0)}</duration></backup>`;
+      if (clefIdx === 0) noteXml += `<backup><duration>${slots.reduce((s, slot) => s + slotDivisions(slot), 0)}</duration></backup>`;
     });
 
     measuresXml += `<measure number="${mi + 1}">${attrs}${noteXml}</measure>`;
@@ -496,9 +604,11 @@ document.getElementById('exportMusicXml').addEventListener('click', () => {
 
 // ---------- Export: MIDI ----------
 
+const MIDI_TICKS_PER_QUARTER = 128;
+
 function vexKeyToMidiWriterPitch(vexKey) {
   const [name, octave] = vexKey.split('/');
-  return `${name.replace('#', '#').toUpperCase()}${octave}`;
+  return `${name.toUpperCase()}${octave}`;
 }
 
 document.getElementById('exportMidi').addEventListener('click', () => {
@@ -509,20 +619,18 @@ document.getElementById('exportMidi').addEventListener('click', () => {
     track.setTempo(tempo);
     let pendingWait = [];
     events.forEach((ev) => {
+      const ticks = 'T' + Math.round(ev.beats * MIDI_TICKS_PER_QUARTER);
       const keys = ev[clef];
       if (keys.length === 0) {
-        pendingWait.push(ev.duration);
+        pendingWait.push(ticks);
         return;
       }
-      const pitches = keys.map(vexKeyToMidiWriterPitch);
-      const noteEvent = new MidiWriter.NoteEvent({ pitch: pitches, duration: ev.duration, wait: pendingWait });
-      track.addEvent(noteEvent);
+      track.addEvent(new MidiWriter.NoteEvent({ pitch: keys.map(vexKeyToMidiWriterPitch), duration: ticks, wait: pendingWait }));
       pendingWait = [];
     });
     return track;
   });
-  const writer = new MidiWriter.Writer(tracks);
-  downloadBlob(writer.buildFile(), 'transcription.mid', 'audio/midi');
+  downloadBlob(new MidiWriter.Writer(tracks).buildFile(), 'transcription.mid', 'audio/midi');
   log('Exported MIDI.');
 });
 
