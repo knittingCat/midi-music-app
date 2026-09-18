@@ -622,7 +622,12 @@ function render(rowMaxWidth) {
     if (!entry || entry.key !== key) entry = { key, ...drawRow(row, incomingTie) };
     nextCache.push(entry);
 
+    // VexFlow's resize() also wrote this row's own width as an inline style,
+    // which would override the shared width attribute below.
+    entry.svg.style.width = `${width}px`;
+    entry.svg.style.height = `${ROW_HEIGHT}px`;
     entry.svg.setAttribute('width', width);
+    entry.svg.setAttribute('height', ROW_HEIGHT);
     entry.svg.setAttribute('viewBox', `0 0 ${width} ${ROW_HEIGHT}`);
     if (notationEl.children[rowIdx] !== entry.svg) {
       notationEl.insertBefore(entry.svg, notationEl.children[rowIdx] || null);
@@ -1111,6 +1116,12 @@ function vexKeyToMidiWriterPitch(vexKey) {
 // ---------- Export: PDF (via print) ----------
 
 const PRINT_ROW_WIDTH = 720;
+
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => render(), 150);
+});
 
 window.addEventListener('beforeprint', () => render(PRINT_ROW_WIDTH));
 window.addEventListener('afterprint', () => render());
