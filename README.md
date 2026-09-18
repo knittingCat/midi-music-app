@@ -10,7 +10,13 @@ Plug in a MIDI keyboard, play, and watch your notes appear as sheet music on a g
 tlib install knittingCat/midi-music-app
 ```
 
-That gives you two commands: `midi-music-app` (start) and `midi-music-app-stop` (stop). Run `tlib install knittingCat/midi-music-app` again at any time to update.
+That gives you two commands: `midi-music-app` (start) and `midi-music-app-stop` (stop). To pick up a new version later:
+
+```bash
+tlib update knittingCat/midi-music-app
+```
+
+(On a tlib without the `update` command, run `tlib install knittingCat/midi-music-app` again instead.)
 
 See [Bluegrayfoo/TLIB](https://github.com/Bluegrayfoo/TLIB) for TLIB itself.
 
