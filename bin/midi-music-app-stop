@@ -1,9 +1,26 @@
 #!/usr/bin/env bash
 set -e
-PID=$(lsof -ti :3000 2>/dev/null || true)
-if [ -z "$PID" ]; then
-  echo "midi-music-app is not running on port 3000"
-  exit 0
+PID_FILE="$HOME/.midi-music-app.pid"
+PORT_RANGE="3000-3020"
+
+if [ -f "$PID_FILE" ]; then
+  read -r PID PORT < "$PID_FILE"
+  if kill -0 "$PID" 2>/dev/null; then
+    kill "$PID"
+    echo "Stopped midi-music-app on port $PORT (pid $PID)"
+    exit 0
+  fi
+  rm -f "$PID_FILE"
 fi
-kill $PID
-echo "Stopped midi-music-app (pid $PID)"
+
+STOPPED=0
+for PID in $(lsof -ti "tcp:$PORT_RANGE" -sTCP:LISTEN 2>/dev/null | sort -u); do
+  if lsof -p "$PID" -Fn 2>/dev/null | grep -q 'midi-music-app'; then
+    PORT=$(lsof -a -p "$PID" -iTCP -sTCP:LISTEN -Fn 2>/dev/null | grep -o ':[0-9]*$' | head -1 | tr -d ':')
+    kill "$PID"
+    echo "Stopped midi-music-app on port ${PORT:-?} (pid $PID)"
+    STOPPED=1
+  fi
+done
+
+[ "$STOPPED" -eq 1 ] || echo "midi-music-app is not running"

@@ -37,6 +37,8 @@ npm install
 | With tlib | `midi-music-app` | `midi-music-app-stop` |
 | Without tlib | `npm start` (from inside the cloned repo) | Ctrl+C |
 
+The server binds to `127.0.0.1:3000`. If that port is busy it takes the next free one (up to 3020) and prints the URL it chose; you can also pick one with `midi-music-app --port 8080` or `PORT=8080 npm start`. `midi-music-app-stop` stops only this app's server, never whatever else might be on the port.
+
 Then open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported in Safari or Firefox), allow MIDI access when prompted, click once anywhere on the page so the browser will allow audio, and play.
 
 ## Controls
