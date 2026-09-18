@@ -7,12 +7,12 @@ const timeSigSelect = document.getElementById('timeSig');
 const logEl = document.getElementById('log');
 const notationEl = document.getElementById('notation');
 
-const STRIKE_MS = 50;         // notes this close together are one chord no matter what
+const STRIKE_MS = 75;         // notes this close together are one chord no matter what
 const CHORD_GAP_MS = 160;     // max gap between successive notes of a rolled chord
-const CHORD_HOLD_MS = 80;     // earlier chord notes must stay held this long after a new one
+const CHORD_HOLD_MS = 150;    // earlier chord notes must stay held this long after a new one
 const PAUSE_MS = 3000;
 const REST_MIN_BEATS = 0.5;
-const RUN_TOLERANCE = 1.22;   // intervals within this ratio of the previous one share its value
+const RUN_TOLERANCE = 1.35;   // intervals within this ratio of the run's average share its value
 const EPS = 1e-6;
 
 const NOTE_NAMES = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b'];
@@ -164,18 +164,22 @@ function chordRaw(chord, nextOnsetTime) {
 function buildEvents(chordList) {
   const raws = chordList.map((c, i) => chordRaw(c, chordList[i + 1]?.onsetTime ?? null));
   const out = [];
-  let prevNoteRaw = null;
-  let prevNoteBeats = null;
+  let run = null; // { sum, count, beats } for the current stretch of similarly spaced legato notes
   chordList.forEach((chord, i) => {
     const { treble, bass } = splitChordByClef(chord.notes);
     const raw = raws[i];
     const nextRaw = raws[i + 1]?.note ?? null;
-    let beats = quantizeNoteBeats(raw.note, nextRaw);
-    const sameRun = prevNoteRaw != null && raw.legato && Math.abs(Math.log2(raw.note / prevNoteRaw)) < Math.log2(RUN_TOLERANCE);
-    if (sameRun) beats = prevNoteBeats;
+    let beats;
+    const inRun = run && raw.legato && Math.abs(Math.log2(raw.note / (run.sum / run.count))) < Math.log2(RUN_TOLERANCE);
+    if (inRun) {
+      run.sum += raw.note;
+      run.count++;
+      beats = run.beats;
+    } else {
+      beats = quantizeNoteBeats(raw.note, nextRaw);
+      run = raw.legato ? { sum: raw.note, count: 1, beats } : null;
+    }
     out.push({ treble, bass, beats, rawBeats: raw.note, chordIndex: i });
-    prevNoteRaw = raw.legato ? raw.note : null;
-    prevNoteBeats = beats;
     if (raw.rest) {
       const restRaw = raw.rest - beats;
       const restBeats = quantizeRestBeats(restRaw);
@@ -249,28 +253,34 @@ tempoInput.addEventListener('change', requantize);
 const TEMPO_MIN = 40;
 const TEMPO_MAX = 200;
 const TEMPO_PRIOR_CENTER = 100;
-const TEMPO_PRIOR_WEIGHT = 0.3;
+const TEMPO_PRIOR_WEIGHT = 0.5;
+const TEMPO_SWITCH_GAIN = 1.15;  // only move the tempo when the fit improves by this factor
 const IOI_RATIOS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
-const IOI_RATIO_PENALTY = { 0.25: 0.35, 0.5: 0.1, 0.75: 0.5, 1: 0, 1.5: 0.2, 2: 0.1, 3: 0.3, 4: 0.3 };
+const IOI_RATIO_PENALTY = { 0.25: 0.2, 0.5: 0.1, 0.75: 0.5, 1: 0, 1.5: 0.2, 2: 0.1, 3: 0.3, 4: 0.3 };
 const MIN_IOIS_FOR_AUTO = 4;
 
-// Picks the BPM at which the inter-onset intervals best fit simple note values
+// How badly the inter-onset intervals fit simple note values at this BPM
+function tempoCost(iois, bpm) {
+  const beat = 60000 / bpm;
+  let cost = TEMPO_PRIOR_WEIGHT * Math.abs(Math.log2(bpm / TEMPO_PRIOR_CENTER)) * iois.length;
+  for (const ioi of iois) {
+    const r = ioi / beat;
+    let c = Infinity;
+    for (const ratio of IOI_RATIOS) {
+      const e = Math.log2(r / ratio);
+      const v = e * e * 8 + IOI_RATIO_PENALTY[ratio];
+      if (v < c) c = v;
+    }
+    cost += c;
+  }
+  return cost;
+}
+
 function estimateTempo(iois) {
   let best = null;
   let bestCost = Infinity;
   for (let bpm = TEMPO_MIN; bpm <= TEMPO_MAX; bpm++) {
-    const beat = 60000 / bpm;
-    let cost = TEMPO_PRIOR_WEIGHT * Math.abs(Math.log2(bpm / TEMPO_PRIOR_CENTER)) * iois.length;
-    for (const ioi of iois) {
-      const r = ioi / beat;
-      let c = Infinity;
-      for (const ratio of IOI_RATIOS) {
-        const e = Math.log2(r / ratio);
-        const v = e * e * 8 + IOI_RATIO_PENALTY[ratio];
-        if (v < c) c = v;
-      }
-      cost += c;
-    }
+    const cost = tempoCost(iois, bpm);
     if (cost < bestCost) { bestCost = cost; best = bpm; }
   }
   return best;
@@ -290,7 +300,9 @@ function applyAutoTempo() {
   const iois = chordIois();
   if (iois.length < MIN_IOIS_FOR_AUTO) return;
   const bpm = estimateTempo(iois);
-  if (bpm === Number(tempoInput.value)) return;
+  const current = Number(tempoInput.value) || 120;
+  if (bpm === current) return;
+  if (current >= TEMPO_MIN && current <= TEMPO_MAX && tempoCost(iois, current) <= TEMPO_SWITCH_GAIN * tempoCost(iois, bpm)) return;
   tempoInput.value = bpm;
   log(`Auto tempo: ${bpm} BPM — re-quantized ${iois.length + 1} chords.`);
 }

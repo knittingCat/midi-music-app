@@ -48,7 +48,7 @@ Then open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported
 | MIDI input | Choose which device to listen to |
 | Tempo | Reference BPM used to quantize durations (and for playback / MP3) |
 | Tap tempo | Click the button (or press T) in time; the tempo updates live from the average of the current run, and a two-second pause starts a new run |
-| Auto tempo | Detects the tempo from your playing (the BPM between 40 and 200 at which the gaps between your chords best fit simple note values, leaning toward moderate tempos) and re-quantizes everything already written whenever the estimate changes; disables the tempo field, tap tempo, and metronome while on |
+| Auto tempo | Detects the tempo from your playing (the BPM between 40 and 200 at which the gaps between your chords best fit simple note values, leaning toward moderate tempos) and re-quantizes everything already written when the estimate changes; it only moves when the new tempo fits clearly better, so it doesn't drift by a beat or two every note; disables the tempo field, tap tempo, and metronome while on |
 | Metronome | Clicks on every beat at the set tempo, accented on beat 1; only available while auto tempo is off |
 | Time signature | Bar length used for measure breaks |
 | Live piano sound | Hear a sampled piano as you play |
@@ -62,9 +62,9 @@ Then open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported
 ## How it works
 
 - The browser reads your keyboard through the Web MIDI API; the Node server just serves the page and the vendored libraries.
-- Notes struck within 50 ms are one chord. Beyond that, a note still joins the chord if the earlier notes are being held when it arrives (within 160 ms) and stay held a little longer, so rolled or slightly uneven chords group correctly while trills and runs, which let go of each note as the next starts, stay separate. Grouping is re-derived from the raw notes, so it can settle once the keys come up.
+- Notes struck within 75 ms are one chord. Beyond that, a note still joins the chord if the earlier notes are being held when it arrives (within 160 ms) and stay held at least 150 ms longer, so rolled or slightly uneven chords group correctly while trills and runs, which let go of each note as the next starts, stay separate. Grouping is re-derived from the raw notes, so it can settle once the keys come up.
 - The raw performance (each chord's onset and release time) is kept, and the notation is derived from it, so changing the tempo — by typing, tapping, or auto tempo — re-quantizes everything already on the page.
-- Rhythm comes from the time between chord onsets, snapped to the nearest value from whole to 16th at the current tempo. A run of notes with similar spacing shares one value rather than flickering between eighths and sixteenths, and a dotted eighth is only written when it's paired with a sixteenth. A gap of at least an eighth note between releasing a key and pressing the next one becomes a rest; shorter gaps are treated as legato.
+- Rhythm comes from the time between chord onsets, snapped to the nearest value from whole to 16th at the current tempo. A run of notes whose spacing stays close to the run's average shares one value rather than flickering between eighths and sixteenths (so a slightly swung trill is still written evenly), and a dotted eighth is only written when it's paired with a sixteenth. A gap of at least an eighth note between releasing a key and pressing the next one becomes a rest; shorter gaps are treated as legato.
 - Notes at or above middle C go on the treble staff; everything below goes on the bass staff. Notes that cross a barline are split and tied.
 - The log under the score shows, for every note, how long you actually held it versus how it was written, so you can see how far off the quantization was and adjust the tempo.
 - The last chord appears as soon as all its keys are released.
