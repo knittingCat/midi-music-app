@@ -271,8 +271,11 @@ function rebuildEvents() {
   logNewChords(complete);
 }
 
+// A chord's length is only settled once the chord after it has been released:
+// until then a late note may still merge into it, or split off from it, and
+// move the next onset. Logging earlier printed values that were later revised.
 function logNewChords(complete) {
-  const closed = Math.min(complete.length, chords.length - 1);
+  const closed = complete.length - 1;
   for (let i = loggedChords; i < closed; i++) {
     const chord = complete[i];
     const names = [...chord.notes.values()].map((n) => n.display).join(' ');
