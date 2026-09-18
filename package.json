@@ -12,6 +12,7 @@
   "description": "Listens to a MIDI keyboard and transcribes what you play into live sheet music, with MusicXML and MIDI export",
   "dependencies": {
     "express": "^5.2.1",
+    "lamejs": "^1.2.1",
     "midi-writer-js": "^3.2.1",
     "vexflow": "^5.0.0"
   }

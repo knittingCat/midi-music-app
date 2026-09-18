@@ -21,6 +21,16 @@
   #staffScroll { overflow-x: auto; background: #fff; margin: 20px 24px; border: 1px solid #ddd; border-radius: 8px; padding: 10px; min-height: 220px; }
   #notation { display: block; }
   #log { margin: 0 24px 24px; font-size: 12px; color: #777; max-height: 80px; overflow-y: auto; white-space: pre-wrap; font-family: ui-monospace, monospace; }
+  .export-group { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #555; }
+  .playing text { fill: #d8321f; }
+  .playing path { stroke: #d8321f; }
+  @media print {
+    @page { margin: 12mm; }
+    header, .toolbar, #status, #log { display: none; }
+    body { background: #fff; }
+    #staffScroll { margin: 0; padding: 0; border: none; overflow: visible; min-height: 0; }
+    #notation svg { width: 100%; height: auto; }
+  }
 </style>
 </head>
 <body>
@@ -47,8 +57,12 @@
   <button id="playBtn">&#9654; Play</button>
   <button id="finalizeBtn" class="secondary">Finalize current chord</button>
   <button id="clearBtn" class="secondary">Clear</button>
-  <button id="exportMusicXml">Export MusicXML</button>
-  <button id="exportMidi">Export MIDI</button>
+  <span class="export-group">Save as
+    <button id="exportMusicXml">MusicXML</button>
+    <button id="exportMidi">MIDI</button>
+    <button id="exportPdf">PDF</button>
+    <button id="exportMp3">MP3</button>
+  </span>
 </div>
 <div id="status">Waiting for Web MIDI…</div>
 
@@ -58,6 +72,7 @@
 <script src="/vendor/vexflow.js"></script>
 <script src="/vendor/midiwriter.js"></script>
 <script src="/vendor/acoustic_grand_piano-mp3.js"></script>
+<script src="/vendor/lame.min.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

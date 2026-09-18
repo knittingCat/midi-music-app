@@ -88,17 +88,26 @@ function splitChordByClef(notesMap) {
   return { treble, bass };
 }
 
-function pushRest(beats) {
-  if (beats < MIN_BEATS - EPS) return;
-  events.push({ treble: [], bass: [], beats });
-  log(`Rest (${beatsLabel(beats)})`);
+function timingLabel(rawBeats, beats) {
+  const diff = beats - rawBeats;
+  const sign = diff >= 0 ? '+' : '';
+  return `played ${(rawBeats * quarterMs()).toFixed(0)}ms = ${rawBeats.toFixed(2)} beats → ${beatsLabel(beats)} (${beats} beats, ${sign}${diff.toFixed(2)})`;
 }
 
-function pushChord(chord, beats) {
+function pushRest(rawBeats) {
+  const beats = quantizeRestBeats(rawBeats);
+  if (beats < MIN_BEATS - EPS) return;
+  events.push({ treble: [], bass: [], beats });
+  log(`Rest: ${timingLabel(rawBeats, beats)}`);
+}
+
+function pushChord(chord, rawBeats) {
+  const beats = quantizeNoteBeats(rawBeats);
   const { treble, bass } = splitChordByClef(chord.notes);
   events.push({ treble, bass, beats });
   const names = [...chord.notes.values()].map((n) => n.display).join(' ');
-  log(`Note(s): ${names}  (${beatsLabel(beats)})`);
+  log(`${names}: ${timingLabel(rawBeats, beats)}`);
+  return beats;
 }
 
 function finalizeChord(chord, nextOnsetTime) {
@@ -108,17 +117,15 @@ function finalizeChord(chord, nextOnsetTime) {
   const gapBeats = (nextOnsetTime - releaseTime) / q;
 
   if (gapBeats >= REST_MIN_BEATS) {
-    const noteBeats = quantizeNoteBeats((releaseTime - chord.onsetTime) / q);
-    pushChord(chord, noteBeats);
-    pushRest(quantizeRestBeats(onsetToOnset - noteBeats));
+    const noteBeats = pushChord(chord, (releaseTime - chord.onsetTime) / q);
+    pushRest(onsetToOnset - noteBeats);
   } else {
-    pushChord(chord, quantizeNoteBeats(onsetToOnset));
+    pushChord(chord, onsetToOnset);
   }
 }
 
 function finalizeHeldChord(chord) {
-  const heldMs = chord.lastNoteOffTime - chord.onsetTime;
-  pushChord(chord, quantizeNoteBeats(heldMs / quarterMs()));
+  pushChord(chord, (chord.lastNoteOffTime - chord.onsetTime) / quarterMs());
   lastChordReleaseTime = chord.lastNoteOffTime;
 }
 
@@ -135,7 +142,7 @@ function onNoteOn(pitch) {
     finalizeChord(currentChord, now);
   } else if (lastChordReleaseTime != null) {
     const gapBeats = (now - lastChordReleaseTime) / quarterMs();
-    if (gapBeats >= REST_MIN_BEATS) pushRest(quantizeRestBeats(gapBeats));
+    if (gapBeats >= REST_MIN_BEATS) pushRest(gapBeats);
   }
 
   currentChord = {
@@ -200,7 +207,7 @@ function groupIntoMeasures() {
   let current = [];
   let acc = 0;
 
-  for (const ev of events) {
+  events.forEach((ev, eventIndex) => {
     const isRest = ev.treble.length === 0 && ev.bass.length === 0;
     let remaining = ev.beats;
     while (remaining > EPS) {
@@ -209,7 +216,7 @@ function groupIntoMeasures() {
       const lastChunk = remaining - chunk <= EPS;
       parts.forEach((p, i) => {
         const lastPart = lastChunk && i === parts.length - 1;
-        current.push({ treble: ev.treble, bass: ev.bass, code: p.code, dotted: p.dotted, tieToNext: !isRest && !lastPart });
+        current.push({ treble: ev.treble, bass: ev.bass, code: p.code, dotted: p.dotted, tieToNext: !isRest && !lastPart, eventIndex });
       });
       acc += chunk;
       remaining -= chunk;
@@ -219,7 +226,7 @@ function groupIntoMeasures() {
         acc = 0;
       }
     }
-  }
+  });
   if (current.length) measures.push(current);
   return measures;
 }
@@ -238,8 +245,7 @@ function buildStaveNotes(slots, clef) {
   });
 }
 
-function layoutMeasures(measures) {
-  const rowMaxWidth = Math.max(600, notationEl.parentElement.clientWidth - 40);
+function layoutMeasures(measures, rowMaxWidth) {
   const rows = [];
   let row = [];
   let x = 0;
@@ -260,18 +266,22 @@ function layoutMeasures(measures) {
   return rows;
 }
 
-function render() {
+let noteElements = [];
+
+function render(rowMaxWidth) {
   notationEl.innerHTML = '';
+  noteElements = [];
   const measures = groupIntoMeasures();
   if (measures.length === 0) return;
 
   const ROW_HEIGHT = 210;
-  const rows = layoutMeasures(measures);
+  const rows = layoutMeasures(measures, rowMaxWidth || Math.max(600, notationEl.parentElement.clientWidth - 40));
   const width = Math.max(...rows.map((r) => r.reduce((s, m) => s + m.width, 0))) + 40;
   const height = rows.length * ROW_HEIGHT + 30;
 
   const renderer = new VF.Renderer(notationEl, VF.Renderer.Backends.SVG);
   renderer.resize(width, height);
+  notationEl.querySelector('svg').setAttribute('viewBox', `0 0 ${width} ${height}`);
   const ctx = renderer.getContext();
   const [num, den] = timeSigSelect.value.split('/').map(Number);
 
@@ -315,6 +325,10 @@ function render() {
       voices.bass.draw(ctx, bassStave);
       beams.treble.forEach((b) => b.setContext(ctx).draw());
       beams.bass.forEach((b) => b.setContext(ctx).draw());
+
+      m.slots.forEach((slot, i) => {
+        (noteElements[slot.eventIndex] ||= []).push(notes.treble[i].getSVGElement(), notes.bass[i].getSVGElement());
+      });
 
       ['treble', 'bass'].forEach((clef) => {
         m.slots.forEach((slot, i) => {
@@ -468,23 +482,65 @@ function liveNoteOff(pitch) {
   voice.source.stop(now + 0.3);
 }
 
+const RELEASE_SEC = 0.25;
+
 function scheduleSample(ctx, buffer, startAt, durationSec) {
   const source = ctx.createBufferSource();
   const gain = ctx.createGain();
   source.buffer = buffer;
-  const release = 0.25;
   gain.gain.setValueAtTime(1, startAt);
   gain.gain.setValueAtTime(1, startAt + durationSec);
-  gain.gain.exponentialRampToValueAtTime(0.001, startAt + durationSec + release);
+  gain.gain.exponentialRampToValueAtTime(0.001, startAt + durationSec + RELEASE_SEC);
   source.connect(gain).connect(ctx.destination);
   source.start(startAt);
-  source.stop(startAt + durationSec + release);
-  activeSources.push(source);
+  source.stop(startAt + durationSec + RELEASE_SEC);
+  return source;
+}
+
+async function ensureSamplesLoaded() {
+  const neededKeys = new Set(events.flatMap((ev) => [...ev.treble, ...ev.bass]));
+  await Promise.all([...neededKeys].map((k) => loadSample(audioCtx, vexKeyToSampleName(k))));
+}
+
+// Schedules every event into ctx; returns { sources, onsets: [{ index, at }], endAt }
+function scheduleEvents(ctx, startAt) {
+  const quarterSec = quarterMs() / 1000;
+  const sources = [];
+  const onsets = [];
+  let t = startAt;
+  events.forEach((ev, index) => {
+    const durationSec = ev.beats * quarterSec;
+    onsets.push({ index, at: t });
+    for (const key of [...ev.treble, ...ev.bass]) {
+      const buffer = sampleCache.get(vexKeyToSampleName(key));
+      if (buffer) sources.push(scheduleSample(ctx, buffer, t, durationSec));
+    }
+    t += durationSec;
+  });
+  return { sources, onsets, endAt: t };
+}
+
+let highlightTimers = [];
+let highlighted = [];
+
+function setHighlight(eventIndex) {
+  highlighted.forEach((el) => el.classList.remove('playing'));
+  highlighted = noteElements[eventIndex] || [];
+  highlighted.forEach((el) => el.classList.add('playing'));
+  if (highlighted[0]) highlighted[0].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+function clearHighlight() {
+  highlightTimers.forEach(clearTimeout);
+  highlightTimers = [];
+  highlighted.forEach((el) => el.classList.remove('playing'));
+  highlighted = [];
 }
 
 function stopPlayback() {
   clearTimeout(playbackEndTimer);
   playbackEndTimer = null;
+  clearHighlight();
   for (const src of activeSources) {
     try { src.stop(); } catch (_) {}
   }
@@ -494,26 +550,19 @@ function stopPlayback() {
 }
 
 async function startPlayback() {
-  const quarterSec = quarterMs() / 1000;
   if (audioCtx.state === 'suspended') await audioCtx.resume();
-
   isPlaying = true;
   playBtn.innerHTML = '&#9632; Stop';
 
-  const neededKeys = new Set(events.flatMap((ev) => [...ev.treble, ...ev.bass]));
-  await Promise.all([...neededKeys].map((k) => loadSample(audioCtx, vexKeyToSampleName(k))));
+  await ensureSamplesLoaded();
   if (!isPlaying) return;
 
-  let t = audioCtx.currentTime + 0.05;
-  for (const ev of events) {
-    const durationSec = ev.beats * quarterSec;
-    for (const key of [...ev.treble, ...ev.bass]) {
-      const buffer = sampleCache.get(vexKeyToSampleName(key));
-      if (buffer) scheduleSample(audioCtx, buffer, t, durationSec);
-    }
-    t += durationSec;
-  }
-  playbackEndTimer = setTimeout(stopPlayback, (t - audioCtx.currentTime) * 1000 + 300);
+  const startAt = audioCtx.currentTime + 0.05;
+  const { sources, onsets, endAt } = scheduleEvents(audioCtx, startAt);
+  activeSources = sources;
+  const now = audioCtx.currentTime;
+  highlightTimers = onsets.map(({ index, at }) => setTimeout(() => setHighlight(index), (at - now) * 1000));
+  playbackEndTimer = setTimeout(stopPlayback, (endAt - audioCtx.currentTime) * 1000 + RELEASE_SEC * 1000);
 }
 
 playBtn.addEventListener('click', () => {
@@ -610,6 +659,78 @@ function vexKeyToMidiWriterPitch(vexKey) {
   const [name, octave] = vexKey.split('/');
   return `${name.toUpperCase()}${octave}`;
 }
+
+// ---------- Export: PDF (via print) ----------
+
+const PRINT_ROW_WIDTH = 720;
+
+window.addEventListener('beforeprint', () => render(PRINT_ROW_WIDTH));
+window.addEventListener('afterprint', () => render());
+
+document.getElementById('exportPdf').addEventListener('click', () => {
+  if (events.length === 0) { log('Nothing to export yet.'); return; }
+  log('Choose "Save as PDF" as the destination in the print dialog.');
+  window.print();
+});
+
+// ---------- Export: MP3 ----------
+
+const exportMp3Btn = document.getElementById('exportMp3');
+
+async function renderToAudioBuffer() {
+  await ensureSamplesLoaded();
+  const totalSec = events.reduce((s, ev) => s + ev.beats, 0) * (quarterMs() / 1000) + RELEASE_SEC + 0.5;
+  const sampleRate = audioCtx.sampleRate;
+  const offline = new OfflineAudioContext(2, Math.ceil(totalSec * sampleRate), sampleRate);
+  scheduleEvents(offline, 0.05);
+  return offline.startRendering();
+}
+
+function floatToInt16(samples) {
+  const out = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
+}
+
+function encodeMp3(buffer) {
+  const encoder = new lamejs.Mp3Encoder(2, buffer.sampleRate, 160);
+  const left = floatToInt16(buffer.getChannelData(0));
+  const right = floatToInt16(buffer.getChannelData(buffer.numberOfChannels > 1 ? 1 : 0));
+  const chunks = [];
+  const BLOCK = 1152;
+  for (let i = 0; i < left.length; i += BLOCK) {
+    const chunk = encoder.encodeBuffer(left.subarray(i, i + BLOCK), right.subarray(i, i + BLOCK));
+    if (chunk.length) chunks.push(chunk);
+  }
+  const tail = encoder.flush();
+  if (tail.length) chunks.push(tail);
+  return new Blob(chunks, { type: 'audio/mpeg' });
+}
+
+exportMp3Btn.addEventListener('click', async () => {
+  if (events.length === 0) { log('Nothing to export yet.'); return; }
+  exportMp3Btn.disabled = true;
+  exportMp3Btn.textContent = 'Encoding…';
+  try {
+    const buffer = await renderToAudioBuffer();
+    const blob = encodeMp3(buffer);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'transcription.mp3';
+    a.click();
+    URL.revokeObjectURL(url);
+    log(`Exported MP3 (${(blob.size / 1024).toFixed(0)} KB).`);
+  } catch (err) {
+    log(`MP3 export failed: ${err.message}`);
+  } finally {
+    exportMp3Btn.disabled = false;
+    exportMp3Btn.textContent = 'MP3';
+  }
+});
 
 document.getElementById('exportMidi').addEventListener('click', () => {
   if (events.length === 0) { log('Nothing to export yet.'); return; }
