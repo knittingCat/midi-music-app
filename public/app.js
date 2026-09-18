@@ -354,6 +354,74 @@ function render(rowMaxWidth) {
   });
 }
 
+// ---------- Tempo calibration ----------
+
+const CALIBRATION_HITS = 8;
+const tempoModal = document.getElementById('tempoModal');
+const tempoProgress = document.getElementById('tempoProgress');
+const tempoScoreEl = document.getElementById('tempoScore');
+let calibration = null; // { onsets: number[] }
+
+function renderCalibrationScore() {
+  tempoScoreEl.innerHTML = '';
+  const MEASURE_W = 260;
+  const renderer = new VF.Renderer(tempoScoreEl, VF.Renderer.Backends.SVG);
+  renderer.resize(MEASURE_W * 2 + 40, 130);
+  const ctx = renderer.getContext();
+  for (let m = 0; m < 2; m++) {
+    const stave = new VF.Stave(20 + m * MEASURE_W, 20, MEASURE_W);
+    if (m === 0) stave.addClef('treble').addTimeSignature('4/4');
+    stave.setContext(ctx).draw();
+    const notes = Array.from({ length: 4 }, () => new VF.StaveNote({ keys: ['c/4', 'e/4', 'g/4'], duration: 'q' }));
+    const voice = new VF.Voice({ numBeats: 4, beatValue: 4 }).addTickables(notes);
+    new VF.Formatter().joinVoices([voice]).formatToStave([voice], stave);
+    voice.draw(ctx, stave);
+  }
+}
+
+function startCalibration() {
+  if (currentChord) {
+    if (!currentChord.allReleased) currentChord.lastNoteOffTime = performance.now();
+    finalizeHeldChord(currentChord);
+    currentChord = null;
+  }
+  lastChordReleaseTime = null;
+  calibration = { onsets: [] };
+  tempoProgress.textContent = 'Waiting for the first chord…';
+  renderCalibrationScore();
+  tempoModal.hidden = false;
+}
+
+function endCalibration() {
+  calibration = null;
+  tempoModal.hidden = true;
+}
+
+function calibrationNoteOn() {
+  const now = performance.now();
+  const { onsets } = calibration;
+  if (onsets.length && now - onsets[onsets.length - 1] <= CHORD_WINDOW_MS) return;
+  onsets.push(now);
+
+  if (onsets.length < CALIBRATION_HITS) {
+    tempoProgress.textContent = `${onsets.length} of ${CALIBRATION_HITS}`;
+    return;
+  }
+
+  const intervals = onsets.slice(1).map((t, i) => t - onsets[i]).sort((a, b) => a - b);
+  const median = intervals[Math.floor(intervals.length / 2)];
+  const bpm = Math.min(300, Math.max(20, Math.round(60000 / median)));
+  tempoInput.value = bpm;
+  const spread = Math.round(60000 / intervals[0] - 60000 / intervals[intervals.length - 1]);
+  log(`Tempo set to ${bpm} BPM from ${CALIBRATION_HITS} chords (fastest–slowest spread ${spread} BPM).`);
+  endCalibration();
+  render();
+}
+
+document.getElementById('tempoTestBtn').addEventListener('click', startCalibration);
+document.getElementById('tempoCancelBtn').addEventListener('click', endCalibration);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && calibration) endCalibration(); });
+
 // ---------- Web MIDI ----------
 
 function setStatus(msg, cls) {
@@ -367,10 +435,11 @@ function attachInput(input) {
     const command = status & 0xf0;
     if (command === 0x90 && data2 > 0) {
       liveNoteOn(data1, data2);
-      onNoteOn(data1);
+      if (calibration) calibrationNoteOn(data1);
+      else onNoteOn(data1);
     } else if (command === 0x80 || (command === 0x90 && data2 === 0)) {
       liveNoteOff(data1);
-      onNoteOff(data1);
+      if (!calibration) onNoteOff(data1);
     }
   };
   connectedName = input.name;
