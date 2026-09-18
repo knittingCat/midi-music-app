@@ -6,21 +6,11 @@ Plug in a MIDI keyboard, play, and watch your notes appear as sheet music on a g
 
 ### With tlib (recommended)
 
-[tlib](https://github.com/BlueGrayFoo/TLIB) is a small package manager that installs GitHub-hosted command repos onto your `PATH`. If you don't have it yet, set it up first:
-
-```bash
-git clone https://github.com/BlueGrayFoo/TLIB.git
-cd TLIB
-chmod +x ZSH.zsh tlibUpdater
-ln -s "$(pwd)/ZSH.zsh" /usr/local/bin/tlib
-ln -s "$(pwd)/tlibUpdater" /usr/local/bin/tlibUpdater
-```
-
-Then install this app:
-
 ```bash
 tlib install knittingCat/midi-music-app
 ```
+
+ See [BlueGrayFoo/TLIB](https://github.com/BlueGrayFoo/TLIB) for TLIB itself.
 
 That gives you two commands: `midi-music-app` (start) and `midi-music-app-stop` (stop). Run `tlib install knittingCat/midi-music-app` again any time to update.
 
