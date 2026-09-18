@@ -142,6 +142,7 @@ document.getElementById('finalizeBtn').addEventListener('click', () => {
 });
 
 document.getElementById('clearBtn').addEventListener('click', () => {
+  stopPlayback();
   events = [];
   currentChord = null;
   lastChordReleaseTime = null;
@@ -291,6 +292,65 @@ if (navigator.requestMIDIAccess) {
 } else {
   setStatus('Web MIDI is not supported in this browser. Use Chrome or Edge.', 'error');
 }
+
+// ---------- Playback ----------
+
+const playBtn = document.getElementById('playBtn');
+let audioCtx = null;
+let playbackEndTimer = null;
+
+function vexKeyToFrequency(vexKey) {
+  const [name, octave] = vexKey.split('/');
+  const midi = NOTE_NAMES.indexOf(name) + (Number(octave) + 1) * 12;
+  return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+function scheduleTone(ctx, freq, startAt, durationSec) {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = 'triangle';
+  osc.frequency.value = freq;
+  const release = Math.min(0.08, durationSec * 0.3);
+  gain.gain.setValueAtTime(0, startAt);
+  gain.gain.linearRampToValueAtTime(0.18, startAt + 0.01);
+  gain.gain.setValueAtTime(0.18, startAt + durationSec - release);
+  gain.gain.linearRampToValueAtTime(0, startAt + durationSec);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(startAt);
+  osc.stop(startAt + durationSec);
+}
+
+function stopPlayback() {
+  clearTimeout(playbackEndTimer);
+  playbackEndTimer = null;
+  if (audioCtx) {
+    audioCtx.close();
+    audioCtx = null;
+  }
+  playBtn.innerHTML = '&#9654; Play';
+}
+
+function startPlayback() {
+  const tempo = Number(tempoInput.value) || 120;
+  const quarterSec = 60 / tempo;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  let t = audioCtx.currentTime + 0.05;
+  for (const ev of events) {
+    const durationSec = durationBeats(ev.duration) * quarterSec;
+    for (const key of [...ev.treble, ...ev.bass]) {
+      scheduleTone(audioCtx, vexKeyToFrequency(key), t, durationSec);
+    }
+    t += durationSec;
+  }
+  playBtn.innerHTML = '&#9632; Stop';
+  playbackEndTimer = setTimeout(stopPlayback, (t - audioCtx.currentTime) * 1000 + 100);
+}
+
+playBtn.addEventListener('click', () => {
+  if (audioCtx) { stopPlayback(); return; }
+  if (events.length === 0) { log('Nothing to play yet.'); return; }
+  startPlayback();
+});
 
 // ---------- Export: MusicXML ----------
 

@@ -51,6 +51,7 @@ Either way, open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not su
 | MIDI input | Choose which device to listen to |
 | Tempo | Reference BPM used to quantize durations |
 | Time signature | Bar length used for measure breaks |
+| Play / Stop | Play back the transcription with a built-in synth at the set tempo |
 | Finalize current chord | Commit the chord currently being held |
 | Clear | Start a new session |
 | Export MusicXML / MIDI | Download the transcription |
