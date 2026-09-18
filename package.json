@@ -1,0 +1,18 @@
+{
+  "name": "midi-music-app",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Listens to a MIDI keyboard and transcribes what you play into live sheet music, with MusicXML and MIDI export",
+  "dependencies": {
+    "express": "^5.2.1",
+    "midi-writer-js": "^3.2.1",
+    "vexflow": "^5.0.0"
+  }
+}

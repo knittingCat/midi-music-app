@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>MIDI Sheet Music Transcriber</title>
+<style>
+  body { font-family: -apple-system, Helvetica, Arial, sans-serif; margin: 0; background: #f4f3ef; color: #222; }
+  header { background: #202124; color: #fff; padding: 16px 24px; }
+  header h1 { margin: 0; font-size: 20px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; padding: 14px 24px; background: #fff; border-bottom: 1px solid #ddd; }
+  .toolbar label { font-size: 13px; color: #555; display: flex; flex-direction: column; gap: 4px; }
+  select, input[type=number], button { font-size: 14px; padding: 6px 10px; border-radius: 6px; border: 1px solid #ccc; background: #fff; }
+  button { cursor: pointer; background: #2d6cdf; color: #fff; border: none; }
+  button:hover { background: #1f52ab; }
+  button.secondary { background: #6b6b6b; }
+  button.secondary:hover { background: #4d4d4d; }
+  button:disabled { background: #aaa; cursor: not-allowed; }
+  #status { font-size: 13px; padding: 0 24px; color: #555; }
+  #status.connected { color: #1a7f37; }
+  #status.error { color: #c62828; }
+  #staffScroll { overflow-x: auto; background: #fff; margin: 20px 24px; border: 1px solid #ddd; border-radius: 8px; padding: 10px; min-height: 220px; }
+  #notation { display: block; }
+  #log { margin: 0 24px 24px; font-size: 12px; color: #777; max-height: 80px; overflow-y: auto; white-space: pre-wrap; font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<header><h1>MIDI Sheet Music Transcriber</h1></header>
+
+<div class="toolbar">
+  <label>MIDI input
+    <select id="deviceSelect"><option>Requesting MIDI access…</option></select>
+  </label>
+  <label>Tempo (BPM)
+    <input type="number" id="tempo" value="120" min="20" max="300" style="width:80px" />
+  </label>
+  <label>Time signature
+    <select id="timeSig">
+      <option value="4/4" selected>4/4</option>
+      <option value="3/4">3/4</option>
+      <option value="2/4">2/4</option>
+      <option value="6/8">6/8</option>
+    </select>
+  </label>
+  <button id="finalizeBtn" class="secondary">Finalize current chord</button>
+  <button id="clearBtn" class="secondary">Clear</button>
+  <button id="exportMusicXml">Export MusicXML</button>
+  <button id="exportMidi">Export MIDI</button>
+</div>
+<div id="status">Waiting for Web MIDI…</div>
+
+<div id="staffScroll"><div id="notation"></div></div>
+<div id="log"></div>
+
+<script src="/vendor/vexflow.js"></script>
+<script src="/vendor/midiwriter.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
