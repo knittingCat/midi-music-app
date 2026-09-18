@@ -15,6 +15,7 @@ const REST_MIN_BEATS = 0.5;
 const RUN_TOLERANCE = 1.5;    // intervals within this ratio of the run's average share its value
 const TRIPLET_VALUES = [1 / 3, 2 / 3]; // eighth-note and quarter-note triplets
 const TRIPLET_BIAS = 0.05;    // log2 margin a triplet fit must beat the straight fit by
+const TRIPLET_EVENNESS = 1.3; // every note of a triplet run must be within this ratio of the run's average
 const EPS = 1e-6;
 
 const NOTE_NAMES = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b'];
@@ -205,10 +206,16 @@ function planRun(run, raws, pos) {
   const dStraight = Math.abs(Math.log2(avg / straight));
   const dTri = Math.abs(Math.log2(avg / tri));
   if (dTri + TRIPLET_BIAS >= dStraight) return plan;
+  const members = raws.slice(run.start, run.end + 1).map((r) => r.note);
+  if (members.some((b) => Math.abs(Math.log2(b / avg)) > Math.log2(TRIPLET_EVENNESS))) return plan;
 
   const capacity = timeSigBeatsInQuarters();
   const groupBeats = tri * 3;
+  // Leftover notes take the nearest straight value; a group that would cross a
+  // barline takes the straight value just below the triplet (its total is
+  // closer to the group's real length than the value above would be).
   const plain = nearestBeats(avg, NOTE_VALUES.filter((b) => b !== 0.75));
+  const squeezed = tri < 0.5 ? 0.25 : 0.5;
   let p = pos;
   for (let i = 0; i < run.count; i++) plan[i] = { beats: plain };
   for (let i = 0; i + 3 <= run.count; i += 3) {
@@ -218,7 +225,8 @@ function planRun(run, raws, pos) {
       for (let k = 0; k < 3; k++) plan[i + k] = { beats: tri, tupletId };
       p += groupBeats;
     } else {
-      p += plain * 3;
+      for (let k = 0; k < 3; k++) plan[i + k] = { beats: squeezed };
+      p += squeezed * 3;
     }
   }
   return plan;
@@ -277,8 +285,30 @@ function logNewChords(complete) {
 }
 
 function requantize() {
+  clearTimeout(redrawTimer);
+  redrawTimer = null;
   rebuildEvents();
   render();
+}
+
+// Re-rendering the whole score is far too slow to do per MIDI message: a fast
+// chord passage would queue every note-on behind the previous redraw and lag
+// both the sound and the notation. Input handlers only record the note and
+// ask for a redraw once the burst pauses (or REDRAW_MAX_WAIT_MS at the latest).
+const REDRAW_IDLE_MS = 60;
+const REDRAW_MAX_WAIT_MS = 250;
+let redrawTimer = null;
+let redrawDeadline = 0;
+
+function requantizeSoon() {
+  const now = performance.now();
+  if (redrawTimer) clearTimeout(redrawTimer);
+  else redrawDeadline = now + REDRAW_MAX_WAIT_MS;
+  redrawTimer = setTimeout(() => {
+    redrawTimer = null;
+    if (autoTempoToggle.checked) applyAutoTempo();
+    requantize();
+  }, Math.max(0, Math.min(REDRAW_IDLE_MS, redrawDeadline - now)));
 }
 
 function onNoteOn(pitch, velocity) {
@@ -289,8 +319,7 @@ function onNoteOn(pitch, velocity) {
   const note = { pitch, vexKey, display, velocity, onset: now, release: null };
   notesPlayed.push(note);
   heldNotes.set(pitch, note);
-  if (autoTempoToggle.checked) applyAutoTempo();
-  requantize();
+  requantizeSoon();
 }
 
 function onNoteOff(pitch) {
@@ -298,7 +327,7 @@ function onNoteOff(pitch) {
   if (!note) return;
   note.release = performance.now();
   heldNotes.delete(pitch);
-  requantize();
+  requantizeSoon();
 }
 
 document.getElementById('clearBtn').addEventListener('click', () => {
@@ -515,7 +544,7 @@ function uniqueNotes(staveNotes) {
 }
 
 // Slots sharing a tupletId are always three consecutive slots of one measure.
-function buildTuplets(slots, staveNotes) {
+function buildTuplets(slots, staveNotes, clef) {
   const groups = new Map();
   slots.forEach((slot, i) => {
     if (slot.tupletId == null) return;
@@ -524,7 +553,7 @@ function buildTuplets(slots, staveNotes) {
   });
   return [...groups.values()]
     .filter((notes) => uniqueNotes(notes).length === notes.length) // skip collapsed rest groups
-    .map((notes) => new VF.Tuplet(notes, { numNotes: 3, notesOccupied: 2 }));
+    .map((notes) => new VF.Tuplet(notes, { numNotes: 3, notesOccupied: 2, location: clef === 'bass' ? VF.Tuplet.LOCATION_BOTTOM : VF.Tuplet.LOCATION_TOP }));
 }
 
 function layoutMeasures(measures, rowMaxWidth) {
@@ -550,97 +579,142 @@ function layoutMeasures(measures, rowMaxWidth) {
 
 let noteElements = [];
 
+const ROW_HEIGHT = 210;
+// Each row of the score is its own <svg>, cached by a key describing exactly
+// what it shows. A new note usually only changes the last row, so a redraw
+// costs one row instead of the whole score. Anything that re-quantizes
+// everything (tempo change, auto tempo) changes every key and redraws all rows.
+let rowCache = [];
+
+function rowKey(row, rowMaxWidth, incomingTie) {
+  return JSON.stringify([
+    rowMaxWidth, timeSigSelect.value, incomingTie.treble, incomingTie.bass,
+    row.map((m) => [m.index, m.width, m.firstInRow,
+      m.slots.map((sl) => [sl.treble, sl.bass, sl.code, sl.dotted, sl.tieToNext, sl.tupletId ?? null, sl.eventIndex])]),
+  ]);
+}
+
 function render(rowMaxWidth) {
-  notationEl.innerHTML = '';
   noteElements = [];
   const measures = groupIntoMeasures();
-  if (measures.length === 0) return;
+  if (measures.length === 0) {
+    notationEl.innerHTML = '';
+    rowCache = [];
+    return;
+  }
 
-  const ROW_HEIGHT = 210;
-  const rows = layoutMeasures(measures, rowMaxWidth || Math.max(600, notationEl.parentElement.clientWidth - 40));
+  const maxWidth = rowMaxWidth || Math.max(600, notationEl.parentElement.clientWidth - 40);
+  const rows = layoutMeasures(measures, maxWidth);
   const width = Math.max(...rows.map((r) => r.reduce((s, m) => s + m.width, 0))) + 40;
-  const height = rows.length * ROW_HEIGHT + 30;
-
-  const renderer = new VF.Renderer(notationEl, VF.Renderer.Backends.SVG);
-  renderer.resize(width, height);
-  notationEl.querySelector('svg').setAttribute('viewBox', `0 0 ${width} ${height}`);
-  const ctx = renderer.getContext();
-  const [num, den] = timeSigSelect.value.split('/').map(Number);
-
-  const pendingTie = { treble: null, bass: null };
+  const incomingTie = { treble: false, bass: false };
+  const nextCache = [];
 
   rows.forEach((row, rowIdx) => {
-    let x = 20;
-    const y = 20 + rowIdx * ROW_HEIGHT;
+    const key = rowKey(row, maxWidth, incomingTie);
+    let entry = rowCache[rowIdx];
+    if (!entry || entry.key !== key) entry = { key, ...drawRow(row, incomingTie) };
+    nextCache.push(entry);
 
-    row.forEach((m) => {
-      const trebleStave = new VF.Stave(x, y, m.width);
-      const bassStave = new VF.Stave(x, y + 95, m.width);
-      if (m.firstInRow) {
-        trebleStave.addClef('treble');
-        bassStave.addClef('bass');
-        if (m.index === 0) {
-          trebleStave.addTimeSignature(timeSigSelect.value);
-          bassStave.addTimeSignature(timeSigSelect.value);
-        }
-      }
-      trebleStave.setContext(ctx).draw();
-      bassStave.setContext(ctx).draw();
-      new VF.StaveConnector(trebleStave, bassStave).setType('brace').setContext(ctx).draw();
-      new VF.StaveConnector(trebleStave, bassStave).setType('singleLeft').setContext(ctx).draw();
+    entry.svg.setAttribute('width', width);
+    entry.svg.setAttribute('viewBox', `0 0 ${width} ${ROW_HEIGHT}`);
+    if (notationEl.children[rowIdx] !== entry.svg) {
+      notationEl.insertBefore(entry.svg, notationEl.children[rowIdx] || null);
+    }
+    entry.noteElements.forEach((els, eventIndex) => { (noteElements[eventIndex] ||= []).push(...els); });
 
-      const notes = {
-        treble: buildStaveNotes(m.slots, 'treble'),
-        bass: buildStaveNotes(m.slots, 'bass'),
-      };
-      const tuplets = {
-        treble: buildTuplets(m.slots, notes.treble),
-        bass: buildTuplets(m.slots, notes.bass),
-      };
-      const tickables = { treble: uniqueNotes(notes.treble), bass: uniqueNotes(notes.bass) };
-      const beams = {
-        treble: VF.Beam.generateBeams(tickables.treble),
-        bass: VF.Beam.generateBeams(tickables.bass),
-      };
-      const voices = {
-        treble: new VF.Voice({ numBeats: num, beatValue: den }).setStrict(false).addTickables(tickables.treble),
-        bass: new VF.Voice({ numBeats: num, beatValue: den }).setStrict(false).addTickables(tickables.bass),
-      };
-
-      new VF.Formatter().joinVoices([voices.treble]).joinVoices([voices.bass]).formatToStave([voices.treble, voices.bass], trebleStave);
-      voices.treble.draw(ctx, trebleStave);
-      voices.bass.draw(ctx, bassStave);
-      beams.treble.forEach((b) => b.setContext(ctx).draw());
-      beams.bass.forEach((b) => b.setContext(ctx).draw());
-      tuplets.treble.forEach((t) => t.setContext(ctx).draw());
-      tuplets.bass.forEach((t) => t.setContext(ctx).draw());
-
-      m.slots.forEach((slot, i) => {
-        (noteElements[slot.eventIndex] ||= []).push(notes.treble[i].getSVGElement(), notes.bass[i].getSVGElement());
-      });
-
-      ['treble', 'bass'].forEach((clef) => {
-        m.slots.forEach((slot, i) => {
-          if (slot[clef].length === 0) return;
-          const indexes = slot[clef].map((_, k) => k);
-          const note = notes[clef][i];
-          if (i === 0 && pendingTie[clef]) {
-            new VF.StaveTie({ lastNote: note, firstIndexes: indexes, lastIndexes: indexes }).setContext(ctx).draw();
-            pendingTie[clef] = null;
-          }
-          if (!slot.tieToNext) return;
-          if (i < m.slots.length - 1) {
-            new VF.StaveTie({ firstNote: note, lastNote: notes[clef][i + 1], firstIndexes: indexes, lastIndexes: indexes }).setContext(ctx).draw();
-          } else {
-            new VF.StaveTie({ firstNote: note, firstIndexes: indexes, lastIndexes: indexes }).setContext(ctx).draw();
-            pendingTie[clef] = note;
-          }
-        });
-      });
-
-      x += m.width;
-    });
+    const last = row[row.length - 1].slots.at(-1);
+    incomingTie.treble = last.tieToNext && last.treble.length > 0;
+    incomingTie.bass = last.tieToNext && last.bass.length > 0;
   });
+  while (notationEl.children.length > rows.length) notationEl.lastChild.remove();
+  rowCache = nextCache;
+}
+
+// Draws one row into a fresh <svg>; returns { svg, noteElements: Map(eventIndex -> [elements]) }
+function drawRow(row, incomingTie) {
+  const holder = document.createElement('div');
+  const renderer = new VF.Renderer(holder, VF.Renderer.Backends.SVG);
+  renderer.resize(row.reduce((s, m) => s + m.width, 0) + 40, ROW_HEIGHT);
+  const svg = holder.querySelector('svg');
+  svg.style.display = 'block';
+  svg.style.overflow = 'visible';
+  const ctx = renderer.getContext();
+  const [num, den] = timeSigSelect.value.split('/').map(Number);
+  const rowNoteElements = new Map();
+  const pendingTie = { ...incomingTie };
+  let x = 20;
+  const y = 20;
+
+  row.forEach((m) => {
+    const trebleStave = new VF.Stave(x, y, m.width);
+    const bassStave = new VF.Stave(x, y + 95, m.width);
+    if (m.firstInRow) {
+      trebleStave.addClef('treble');
+      bassStave.addClef('bass');
+      if (m.index === 0) {
+        trebleStave.addTimeSignature(timeSigSelect.value);
+        bassStave.addTimeSignature(timeSigSelect.value);
+      }
+    }
+    trebleStave.setContext(ctx).draw();
+    bassStave.setContext(ctx).draw();
+    new VF.StaveConnector(trebleStave, bassStave).setType('brace').setContext(ctx).draw();
+    new VF.StaveConnector(trebleStave, bassStave).setType('singleLeft').setContext(ctx).draw();
+
+    const notes = {
+      treble: buildStaveNotes(m.slots, 'treble'),
+      bass: buildStaveNotes(m.slots, 'bass'),
+    };
+    const tuplets = {
+      treble: buildTuplets(m.slots, notes.treble, 'treble'),
+      bass: buildTuplets(m.slots, notes.bass, 'bass'),
+    };
+    const tickables = { treble: uniqueNotes(notes.treble), bass: uniqueNotes(notes.bass) };
+    const beams = {
+      treble: VF.Beam.generateBeams(tickables.treble),
+      bass: VF.Beam.generateBeams(tickables.bass),
+    };
+    const voices = {
+      treble: new VF.Voice({ numBeats: num, beatValue: den }).setStrict(false).addTickables(tickables.treble),
+      bass: new VF.Voice({ numBeats: num, beatValue: den }).setStrict(false).addTickables(tickables.bass),
+    };
+
+    new VF.Formatter().joinVoices([voices.treble]).joinVoices([voices.bass]).formatToStave([voices.treble, voices.bass], trebleStave);
+    voices.treble.draw(ctx, trebleStave);
+    voices.bass.draw(ctx, bassStave);
+    beams.treble.forEach((b) => b.setContext(ctx).draw());
+    beams.bass.forEach((b) => b.setContext(ctx).draw());
+    tuplets.treble.forEach((t) => t.setContext(ctx).draw());
+    tuplets.bass.forEach((t) => t.setContext(ctx).draw());
+
+    m.slots.forEach((slot, i) => {
+      if (!rowNoteElements.has(slot.eventIndex)) rowNoteElements.set(slot.eventIndex, []);
+      rowNoteElements.get(slot.eventIndex).push(notes.treble[i].getSVGElement(), notes.bass[i].getSVGElement());
+    });
+
+    ['treble', 'bass'].forEach((clef) => {
+      m.slots.forEach((slot, i) => {
+        if (slot[clef].length === 0) return;
+        const indexes = slot[clef].map((_, k) => k);
+        const note = notes[clef][i];
+        if (i === 0 && pendingTie[clef]) {
+          new VF.StaveTie({ lastNote: note, firstIndexes: indexes, lastIndexes: indexes }).setContext(ctx).draw();
+          pendingTie[clef] = false;
+        }
+        if (!slot.tieToNext) return;
+        if (i < m.slots.length - 1) {
+          new VF.StaveTie({ firstNote: note, lastNote: notes[clef][i + 1], firstIndexes: indexes, lastIndexes: indexes }).setContext(ctx).draw();
+        } else {
+          new VF.StaveTie({ firstNote: note, firstIndexes: indexes, lastIndexes: indexes }).setContext(ctx).draw();
+          pendingTie[clef] = true;
+        }
+      });
+    });
+
+    x += m.width;
+  });
+
+  return { svg, noteElements: rowNoteElements };
 }
 
 // ---------- Tap tempo ----------
