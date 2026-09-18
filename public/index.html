@@ -22,15 +22,7 @@
   #notation { display: block; }
   #log { margin: 0 24px 24px; font-size: 12px; color: #777; max-height: 80px; overflow-y: auto; white-space: pre-wrap; font-family: ui-monospace, monospace; }
   .export-group { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #555; }
-  .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; z-index: 10; }
-  .modal-card { background: #fff; border-radius: 10px; padding: 20px 28px; max-width: 640px; width: calc(100% - 40px); box-shadow: 0 10px 40px rgba(0,0,0,0.3); }
-  .modal-card h2 { margin: 0 0 8px; font-size: 18px; }
-  .modal-card p { margin: 8px 0; }
-  #tempoScore { overflow-x: auto; margin: 12px 0; }
-  #tempoProgress { font-weight: 600; color: #2d6cdf; }
-  #tempoLive { color: #555; font-size: 13px; min-height: 1.2em; }
-  .instructions { margin: 8px 0; font-size: 14px; line-height: 1.45; }
-  .modal-card { max-width: 760px; max-height: calc(100vh - 40px); overflow-y: auto; }
+  #tapTempoBtn.tapping { background: #2d6cdf; color: #fff; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
   .playing text { fill: #d8321f; }
   .playing path { stroke: #d8321f; }
@@ -53,7 +45,7 @@
   <label>Tempo (BPM)
     <span style="display:flex;gap:6px">
       <input type="number" id="tempo" value="120" min="20" max="300" style="width:80px" />
-      <button id="tempoTestBtn" class="secondary" title="Play a C chord along with a prompt to set the tempo">Set by playing</button>
+      <button id="tapTempoBtn" class="secondary" title="Click in time (or press T) to set the tempo">Tap tempo</button>
     </span>
   </label>
   <label>Time signature
@@ -81,21 +73,6 @@
 
 <div id="staffScroll"><div id="notation"></div></div>
 <div id="log"></div>
-
-<div id="tempoModal" class="modal" hidden>
-  <div class="modal-card">
-    <h2>Set the tempo by playing</h2>
-    <p class="instructions">Left hand: play the three bars below at the tempo of the piece you're about to record. Only the timing is measured, so any pitch is fine. The first two beats are discarded as warm-up and the tempo is the median of the remaining ten; you'll see the result before it's applied.</p>
-    <div id="tempoScore"></div>
-    <p id="tempoProgress">Waiting for the first note…</p>
-    <p id="tempoLive"></p>
-    <div class="modal-actions">
-      <button id="tempoCancelBtn" class="secondary">Cancel</button>
-      <button id="tempoRetryBtn" class="secondary" hidden>Try again</button>
-      <button id="tempoUseBtn" hidden>Use this tempo</button>
-    </div>
-  </div>
-</div>
 
 <script src="/vendor/vexflow.js"></script>
 <script src="/vendor/midiwriter.js"></script>

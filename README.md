@@ -45,7 +45,7 @@ Then open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported
 |---|---|
 | MIDI input | Choose which device to listen to |
 | Tempo | Reference BPM used to quantize durations (and for playback / MP3) |
-| Set by playing | Play three bars of quarter notes (left hand, bass clef); tempo is the median of beats 3–12, shown with its range so you can retake it before it's applied |
+| Tap tempo | Click the button (or press T) in time; the tempo updates live from the average of the current run, and a two-second pause starts a new run |
 | Time signature | Bar length used for measure breaks |
 | Live piano sound | Hear a sampled piano as you play |
 | Play / Stop | Play back the transcription; the notes light up as they sound |

@@ -354,109 +354,45 @@ function render(rowMaxWidth) {
   });
 }
 
-// ---------- Tempo calibration ----------
+// ---------- Tap tempo ----------
 
-const CALIBRATION_HITS = 12;
-const CALIBRATION_WARMUP = 2;
-const CALIBRATION_KEYS = ['c/3'];
-const tempoModal = document.getElementById('tempoModal');
-const tempoProgress = document.getElementById('tempoProgress');
-const tempoLive = document.getElementById('tempoLive');
-const tempoScoreEl = document.getElementById('tempoScore');
-const tempoRetryBtn = document.getElementById('tempoRetryBtn');
-const tempoUseBtn = document.getElementById('tempoUseBtn');
-let calibration = null; // { onsets: number[], chordEls: Element[], result: number|null }
+const TAP_RESET_MS = 2000;
+const TAP_WINDOW = 8;
+const tapTempoBtn = document.getElementById('tapTempoBtn');
+let taps = [];
+let tapResetTimer = null;
 
-function renderCalibrationScore() {
-  tempoScoreEl.innerHTML = '';
-  const MEASURE_W = 230;
-  const measures = CALIBRATION_HITS / 4;
-  const renderer = new VF.Renderer(tempoScoreEl, VF.Renderer.Backends.SVG);
-  renderer.resize(MEASURE_W * measures + 40, 120);
-  const ctx = renderer.getContext();
-  const chordEls = [];
-  for (let m = 0; m < measures; m++) {
-    const stave = new VF.Stave(20 + m * MEASURE_W, 15, MEASURE_W);
-    if (m === 0) stave.addClef('bass').addTimeSignature('4/4');
-    stave.setContext(ctx).draw();
-    const notes = Array.from({ length: 4 }, () => new VF.StaveNote({ keys: CALIBRATION_KEYS, duration: 'q', clef: 'bass' }));
-    const voice = new VF.Voice({ numBeats: 4, beatValue: 4 }).addTickables(notes);
-    new VF.Formatter().joinVoices([voice]).formatToStave([voice], stave);
-    voice.draw(ctx, stave);
-    notes.forEach((n) => chordEls.push(n.getSVGElement()));
-  }
-  return chordEls;
-}
-
-function resetCalibration() {
-  calibration = { onsets: [], chordEls: renderCalibrationScore(), result: null };
-  tempoProgress.textContent = 'Waiting for the first note…';
-  tempoLive.textContent = '';
-  tempoRetryBtn.hidden = true;
-  tempoUseBtn.hidden = true;
-}
-
-function startCalibration() {
-  if (currentChord) {
-    if (!currentChord.allReleased) currentChord.lastNoteOffTime = performance.now();
-    finalizeHeldChord(currentChord);
-    currentChord = null;
-  }
-  lastChordReleaseTime = null;
-  resetCalibration();
-  tempoModal.hidden = false;
-}
-
-function endCalibration() {
-  calibration = null;
-  tempoModal.hidden = true;
-}
-
-function bpmFromIntervals(intervals) {
-  const sorted = [...intervals].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  return Math.min(300, Math.max(20, Math.round(60000 / median)));
-}
-
-function calibrationNoteOn() {
-  if (calibration.result != null) return;
+function tapTempo() {
   const now = performance.now();
-  const { onsets, chordEls } = calibration;
-  if (onsets.length && now - onsets[onsets.length - 1] <= CHORD_WINDOW_MS) return;
-  onsets.push(now);
-  chordEls[onsets.length - 1].classList.add('playing');
+  if (taps.length && now - taps[taps.length - 1] > TAP_RESET_MS) taps = [];
+  taps.push(now);
+  taps = taps.slice(-TAP_WINDOW);
+  tapTempoBtn.classList.add('tapping');
+  clearTimeout(tapResetTimer);
+  tapResetTimer = setTimeout(() => {
+    tapTempoBtn.classList.remove('tapping');
+    tapTempoBtn.textContent = 'Tap tempo';
+    if (taps.length > 1) log(`Tempo set to ${tempoInput.value} BPM by tapping.`);
+    taps = [];
+  }, TAP_RESET_MS);
 
-  const intervals = onsets.slice(1).map((t, i) => t - onsets[i]);
-  if (onsets.length < CALIBRATION_HITS) {
-    const phase = onsets.length <= CALIBRATION_WARMUP ? ' (warm-up)' : '';
-    tempoProgress.textContent = `${onsets.length} of ${CALIBRATION_HITS}${phase}`;
-    if (intervals.length) tempoLive.textContent = `Last beat: ${Math.round(60000 / intervals[intervals.length - 1])} BPM`;
+  if (taps.length < 2) {
+    tapTempoBtn.textContent = 'Tap…';
     return;
   }
-
-  const measured = intervals.slice(CALIBRATION_WARMUP);
-  const bpm = bpmFromIntervals(measured);
-  const fastest = Math.round(60000 / Math.min(...measured));
-  const slowest = Math.round(60000 / Math.max(...measured));
-  const unsteady = (fastest - slowest) / bpm > 0.15;
-  calibration.result = bpm;
-  tempoProgress.textContent = `Measured ${bpm} BPM`;
-  tempoLive.textContent = `Range ${slowest}–${fastest} BPM${unsteady ? ' — wider than 15%, you may want to retake it' : ''}.`;
-  tempoRetryBtn.hidden = false;
-  tempoUseBtn.hidden = false;
-  tempoUseBtn.focus();
+  const avgMs = (taps[taps.length - 1] - taps[0]) / (taps.length - 1);
+  const bpm = Math.min(300, Math.max(20, Math.round(60000 / avgMs)));
+  tempoInput.value = bpm;
+  tapTempoBtn.textContent = `${bpm} BPM`;
 }
 
-tempoUseBtn.addEventListener('click', () => {
-  tempoInput.value = calibration.result;
-  log(`Tempo set to ${calibration.result} BPM by playing.`);
-  endCalibration();
-  render();
+tapTempoBtn.addEventListener('click', tapTempo);
+document.addEventListener('keydown', (e) => {
+  if (e.key.toLowerCase() === 't' && !e.metaKey && !e.ctrlKey && !e.altKey && e.target.tagName !== 'INPUT') {
+    e.preventDefault();
+    tapTempo();
+  }
 });
-tempoRetryBtn.addEventListener('click', resetCalibration);
-document.getElementById('tempoTestBtn').addEventListener('click', startCalibration);
-document.getElementById('tempoCancelBtn').addEventListener('click', endCalibration);
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && calibration) endCalibration(); });
 
 // ---------- Web MIDI ----------
 
@@ -471,11 +407,10 @@ function attachInput(input) {
     const command = status & 0xf0;
     if (command === 0x90 && data2 > 0) {
       liveNoteOn(data1, data2);
-      if (calibration) calibrationNoteOn(data1);
-      else onNoteOn(data1);
+      onNoteOn(data1);
     } else if (command === 0x80 || (command === 0x90 && data2 === 0)) {
       liveNoteOff(data1);
-      if (!calibration) onNoteOff(data1);
+      onNoteOff(data1);
     }
   };
   connectedName = input.name;
