@@ -29,8 +29,7 @@
   #tempoScore { overflow-x: auto; margin: 12px 0; }
   #tempoProgress { font-weight: 600; color: #2d6cdf; }
   #tempoLive { color: #555; font-size: 13px; min-height: 1.2em; }
-  .instructions { margin: 8px 0; padding-left: 22px; font-size: 14px; line-height: 1.45; }
-  .instructions li { margin-bottom: 6px; }
+  .instructions { margin: 8px 0; font-size: 14px; line-height: 1.45; }
   .modal-card { max-width: 760px; max-height: calc(100vh - 40px); overflow-y: auto; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
   .playing text { fill: #d8321f; }
@@ -86,12 +85,7 @@
 <div id="tempoModal" class="modal" hidden>
   <div class="modal-card">
     <h2>Set the tempo by playing</h2>
-    <ol class="instructions">
-      <li><strong>Left hand, one finger.</strong> Find the C one octave below middle C (the C just left of the two black keys, below the middle of the keyboard). Any key works if you'd rather; only the timing is measured.</li>
-      <li>Think of the piece you're about to play and hum a bar of it, so the speed in your head is the real one.</li>
-      <li>Count yourself in (<em>1, 2, 3, 4</em>), then play the note once per beat, <strong>12 times</strong>, following the score below. Keep a steady, relaxed pulse; don't speed up on the way through.</li>
-      <li>The first two notes are treated as warm-up. The tempo comes from the middle of the remaining beats, so one uneven hit won't throw it off. You'll see the result and can try again before it's used.</li>
-    </ol>
+    <p class="instructions">Left hand: play the three bars below at the tempo of the piece you're about to record. Only the timing is measured, so any pitch is fine. The first two beats are discarded as warm-up and the tempo is the median of the remaining ten; you'll see the result before it's applied.</p>
     <div id="tempoScore"></div>
     <p id="tempoProgress">Waiting for the first note…</p>
     <p id="tempoLive"></p>

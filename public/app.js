@@ -441,9 +441,7 @@ function calibrationNoteOn() {
   const unsteady = (fastest - slowest) / bpm > 0.15;
   calibration.result = bpm;
   tempoProgress.textContent = `Measured ${bpm} BPM`;
-  tempoLive.textContent = unsteady
-    ? `Your beats ranged from ${slowest} to ${fastest} BPM, which is quite uneven. Try again for a more reliable reading, or use it anyway.`
-    : `Steady: your beats ranged from ${slowest} to ${fastest} BPM.`;
+  tempoLive.textContent = `Range ${slowest}–${fastest} BPM${unsteady ? ' — wider than 15%, you may want to retake it' : ''}.`;
   tempoRetryBtn.hidden = false;
   tempoUseBtn.hidden = false;
   tempoUseBtn.focus();
