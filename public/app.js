@@ -819,6 +819,27 @@ document.getElementById('exportMusicXml').addEventListener('click', () => {
   log('Exported MusicXML.');
 });
 
+// ---------- Export: log + raw performance ----------
+
+document.getElementById('exportLog').addEventListener('click', () => {
+  const dump = {
+    savedAt: new Date().toISOString(),
+    tempo: Number(tempoInput.value),
+    timeSignature: timeSigSelect.value,
+    autoTempo: autoTempoToggle.checked,
+    performed: performed.map((c) => ({
+      onsetTime: Math.round(c.onsetTime),
+      releaseTime: c.releaseTime == null ? null : Math.round(c.releaseTime),
+      notes: [...c.notes.values()].map((n) => n.display),
+    })),
+    events: events.map((ev) => ({ treble: ev.treble, bass: ev.bass, beats: ev.beats, rawBeats: Number(ev.rawBeats.toFixed(3)) })),
+    log: logEl.textContent.split('\n').filter(Boolean).reverse(),
+  };
+  const stamp = dump.savedAt.replace(/[:.]/g, '-');
+  downloadBlob(JSON.stringify(dump, null, 2), `midi-music-app-log-${stamp}.json`, 'application/json');
+  log('Saved log.');
+});
+
 // ---------- Export: MIDI ----------
 
 const MIDI_TICKS_PER_QUARTER = 128;
