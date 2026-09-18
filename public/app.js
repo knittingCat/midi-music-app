@@ -551,9 +551,16 @@ function buildTuplets(slots, staveNotes, clef) {
     if (!groups.has(slot.tupletId)) groups.set(slot.tupletId, []);
     groups.get(slot.tupletId).push(staveNotes[i]);
   });
+  const location = clef === 'bass' ? VF.Tuplet.LOCATION_BOTTOM : VF.Tuplet.LOCATION_TOP;
   return [...groups.values()]
     .filter((notes) => uniqueNotes(notes).length === notes.length) // skip collapsed rest groups
-    .map((notes) => new VF.Tuplet(notes, { numNotes: 3, notesOccupied: 2, location: clef === 'bass' ? VF.Tuplet.LOCATION_BOTTOM : VF.Tuplet.LOCATION_TOP }));
+    .map((notes) => {
+      // A rest's invisible stem still decides which side VexFlow measures the
+      // bracket from; point it toward the bracket so a bass group with rests
+      // is bracketed below the staff like the others.
+      if (clef === 'bass') notes.forEach((n) => { if (n.isRest()) n.setStemDirection(VF.Stem.DOWN); });
+      return new VF.Tuplet(notes, { numNotes: 3, notesOccupied: 2, location });
+    });
 }
 
 function layoutMeasures(measures, rowMaxWidth) {
