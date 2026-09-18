@@ -7,9 +7,12 @@ const timeSigSelect = document.getElementById('timeSig');
 const logEl = document.getElementById('log');
 const notationEl = document.getElementById('notation');
 
-const CHORD_WINDOW_MS = 60;
-const IDLE_FLUSH_MS = 900;
+const STRIKE_MS = 50;         // notes this close together are one chord no matter what
+const CHORD_GAP_MS = 160;     // max gap between successive notes of a rolled chord
+const CHORD_HOLD_MS = 80;     // earlier chord notes must stay held this long after a new one
+const PAUSE_MS = 3000;
 const REST_MIN_BEATS = 0.5;
+const RUN_TOLERANCE = 1.22;   // intervals within this ratio of the previous one share its value
 const EPS = 1e-6;
 
 const NOTE_NAMES = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b'];
@@ -27,11 +30,14 @@ const DURATIONS = [
 const MIN_BEATS = 0.25;
 const MAX_BEATS = 4;
 
-// performed: [{ onsetTime, releaseTime|null, notes: Map(pitch -> {vexKey, display}) }]
-// events (derived): { treble: [vexKeys], bass: [vexKeys], beats: number }; both empty = rest
-let performed = [];
+// notesPlayed: raw performance, [{ pitch, vexKey, display, onset, release|null }]
+// chords (derived): [{ onsetTime, releaseTime|null, notes: Map(pitch -> {vexKey, display}) }]
+// events (derived): { treble: [vexKeys], bass: [vexKeys], beats, rawBeats }; both empty = rest
+let notesPlayed = [];
+let chords = [];
 let events = [];
-let currentChord = null; // { onsetTime, notes, released: Set, lastNoteOffTime, allReleased }
+const heldNotes = new Map();
+let loggedChords = 0;
 
 const autoTempoToggle = document.getElementById('autoTempo');
 const metronomeToggle = document.getElementById('metronome');
@@ -51,16 +57,24 @@ function quarterMs() {
   return 60000 / (Number(tempoInput.value) || 120);
 }
 
-function quantizeNoteBeats(rawBeats) {
+function nearestBeats(rawBeats, allowed) {
   const ratio = Math.min(Math.max(rawBeats, MIN_BEATS), MAX_BEATS);
-  let best = DURATIONS[0];
+  let best = allowed[0];
   let bestDist = Infinity;
-  for (const cand of DURATIONS) {
-    if (cand.dotted && cand.beats < 0.5) continue;
-    const dist = Math.abs(Math.log2(ratio) - Math.log2(cand.beats));
-    if (dist < bestDist) { bestDist = dist; best = cand; }
+  for (const beats of allowed) {
+    const dist = Math.abs(Math.log2(ratio) - Math.log2(beats));
+    if (dist < bestDist) { bestDist = dist; best = beats; }
   }
-  return best.beats;
+  return best;
+}
+
+const NOTE_VALUES = DURATIONS.filter((d) => !(d.dotted && d.beats < 0.5)).map((d) => d.beats);
+
+// A dotted eighth only makes sense paired with a sixteenth; otherwise it is a
+// slightly long eighth or a short quarter.
+function quantizeNoteBeats(rawBeats, nextRawBeats) {
+  const pairedWithSixteenth = nextRawBeats != null && nextRawBeats <= 0.4;
+  return nearestBeats(rawBeats, pairedWithSixteenth ? NOTE_VALUES : NOTE_VALUES.filter((b) => b !== 0.75));
 }
 
 function quantizeRestBeats(rawBeats) {
@@ -98,125 +112,146 @@ function timingLabel(rawBeats, beats) {
   return `played ${(rawBeats * quarterMs()).toFixed(0)}ms = ${rawBeats.toFixed(2)} beats → ${beatsLabel(beats)} (${beats} beats, ${sign}${diff.toFixed(2)})`;
 }
 
-// Notation for one performed chord given when the next one started (null = last chord)
-function chordEvents(chord, nextOnsetTime) {
+// ---------- Chord grouping ----------
+
+function heldThrough(note, time) {
+  return note.release == null || note.release >= time;
+}
+
+// Successive notes form one chord when they are struck together, or when the
+// earlier notes are still being held when the next arrives and stay held a
+// little longer. Trills and runs release each note as the next one starts.
+function groupChords(notes) {
+  const groups = [];
+  let group = null;
+  for (const note of notes) {
+    const prev = group && group.list[group.list.length - 1];
+    const gap = prev ? note.onset - prev.onset : Infinity;
+    const joins = prev && !group.notes.has(note.pitch) && (
+      gap <= STRIKE_MS ||
+      (gap <= CHORD_GAP_MS && group.list.every((n) => heldThrough(n, note.onset + CHORD_HOLD_MS)))
+    );
+    if (joins) {
+      group.list.push(note);
+      group.notes.set(note.pitch, { vexKey: note.vexKey, display: note.display });
+    } else {
+      group = { onsetTime: note.onset, list: [note], notes: new Map([[note.pitch, { vexKey: note.vexKey, display: note.display }]]) };
+      groups.push(group);
+    }
+  }
+  for (const g of groups) {
+    g.releaseTime = g.list.every((n) => n.release != null) ? Math.max(...g.list.map((n) => n.release)) : null;
+  }
+  return groups;
+}
+
+// ---------- Notation from chords ----------
+
+function chordRaw(chord, nextOnsetTime) {
   const q = quarterMs();
-  const { treble, bass } = splitChordByClef(chord.notes);
-  const out = [];
   if (nextOnsetTime == null) {
-    const held = ((chord.releaseTime ?? chord.onsetTime + q) - chord.onsetTime) / q;
-    out.push({ treble, bass, beats: quantizeNoteBeats(held), rawBeats: held });
-    return out;
+    return { note: ((chord.releaseTime ?? chord.onsetTime + q) - chord.onsetTime) / q, rest: 0, legato: false };
   }
   const onsetToOnset = (nextOnsetTime - chord.onsetTime) / q;
   const releaseTime = chord.releaseTime ?? nextOnsetTime;
   const gapBeats = (nextOnsetTime - releaseTime) / q;
   if (gapBeats >= REST_MIN_BEATS) {
-    const held = (releaseTime - chord.onsetTime) / q;
-    const noteBeats = quantizeNoteBeats(held);
-    out.push({ treble, bass, beats: noteBeats, rawBeats: held });
-    const restRaw = onsetToOnset - noteBeats;
-    const restBeats = quantizeRestBeats(restRaw);
-    if (restBeats >= MIN_BEATS - EPS) out.push({ treble: [], bass: [], beats: restBeats, rawBeats: restRaw });
-  } else {
-    out.push({ treble, bass, beats: quantizeNoteBeats(onsetToOnset), rawBeats: onsetToOnset });
+    return { note: (releaseTime - chord.onsetTime) / q, rest: onsetToOnset, legato: false };
   }
+  return { note: onsetToOnset, rest: 0, legato: true };
+}
+
+function buildEvents(chordList) {
+  const raws = chordList.map((c, i) => chordRaw(c, chordList[i + 1]?.onsetTime ?? null));
+  const out = [];
+  let prevNoteRaw = null;
+  let prevNoteBeats = null;
+  chordList.forEach((chord, i) => {
+    const { treble, bass } = splitChordByClef(chord.notes);
+    const raw = raws[i];
+    const nextRaw = raws[i + 1]?.note ?? null;
+    let beats = quantizeNoteBeats(raw.note, nextRaw);
+    const sameRun = prevNoteRaw != null && raw.legato && Math.abs(Math.log2(raw.note / prevNoteRaw)) < Math.log2(RUN_TOLERANCE);
+    if (sameRun) beats = prevNoteBeats;
+    out.push({ treble, bass, beats, rawBeats: raw.note, chordIndex: i });
+    prevNoteRaw = raw.legato ? raw.note : null;
+    prevNoteBeats = beats;
+    if (raw.rest) {
+      const restRaw = raw.rest - beats;
+      const restBeats = quantizeRestBeats(restRaw);
+      if (restBeats >= MIN_BEATS - EPS) out.push({ treble: [], bass: [], beats: restBeats, rawBeats: restRaw, chordIndex: i });
+    }
+  });
   return out;
 }
 
 function rebuildEvents() {
-  events = performed.flatMap((chord, i) => chordEvents(chord, performed[i + 1]?.onsetTime ?? null));
+  chords = groupChords(notesPlayed);
+  const complete = chords.filter((c, i) => i < chords.length - 1 || c.releaseTime != null);
+  events = buildEvents(complete);
+  logNewChords(complete);
 }
 
-function logChord(chord, nextOnsetTime) {
-  const names = [...chord.notes.values()].map((n) => n.display).join(' ');
-  for (const ev of chordEvents(chord, nextOnsetTime)) {
-    const isRest = ev.treble.length === 0 && ev.bass.length === 0;
-    log(`${isRest ? 'Rest' : names}: ${timingLabel(ev.rawBeats, ev.beats)}`);
+function logNewChords(complete) {
+  const closed = Math.min(complete.length, chords.length - 1);
+  for (let i = loggedChords; i < closed; i++) {
+    const chord = complete[i];
+    const names = [...chord.notes.values()].map((n) => n.display).join(' ');
+    for (const ev of events.filter((e) => e.chordIndex === i)) {
+      const isRest = ev.treble.length === 0 && ev.bass.length === 0;
+      log(`${isRest ? 'Rest' : names}: ${timingLabel(ev.rawBeats, ev.beats)}`);
+    }
   }
+  loggedChords = Math.max(loggedChords, closed);
 }
-
-function commitChord(chord, releaseTime) {
-  const prev = performed[performed.length - 1];
-  performed.push({ onsetTime: chord.onsetTime, releaseTime, notes: chord.notes });
-  if (prev) logChord(prev, chord.onsetTime);
-  if (releaseTime != null) logChord(performed[performed.length - 1], null);
-  if (autoTempoToggle.checked) applyAutoTempo();
-  rebuildEvents();
-}
-
-function onNoteOn(pitch) {
-  const now = performance.now();
-  const { vexKey, display } = midiToKey(pitch);
-
-  if (currentChord && !currentChord.allReleased && now - currentChord.onsetTime <= CHORD_WINDOW_MS) {
-    currentChord.notes.set(pitch, { vexKey, display });
-    return;
-  }
-
-  if (currentChord) {
-    commitChord(currentChord, currentChord.allReleased ? currentChord.lastNoteOffTime : null);
-  }
-
-  currentChord = {
-    onsetTime: now,
-    notes: new Map([[pitch, { vexKey, display }]]),
-    released: new Set(),
-    lastNoteOffTime: null,
-    allReleased: false,
-  };
-  render();
-}
-
-function onNoteOff(pitch) {
-  if (!currentChord || !currentChord.notes.has(pitch)) return;
-  currentChord.lastNoteOffTime = performance.now();
-  currentChord.released.add(pitch);
-  if ([...currentChord.notes.keys()].every((p) => currentChord.released.has(p))) {
-    currentChord.allReleased = true;
-  }
-}
-
-function flushCurrentChord() {
-  if (!currentChord) return;
-  if (!currentChord.allReleased) currentChord.lastNoteOffTime = performance.now();
-  commitChord(currentChord, currentChord.lastNoteOffTime);
-  currentChord = null;
-  render();
-}
-
-function idleFlushCheck() {
-  if (!currentChord || !currentChord.allReleased) return;
-  if (performance.now() - currentChord.lastNoteOffTime > IDLE_FLUSH_MS) flushCurrentChord();
-}
-setInterval(idleFlushCheck, 250);
-
-document.getElementById('finalizeBtn').addEventListener('click', flushCurrentChord);
-
-document.getElementById('clearBtn').addEventListener('click', () => {
-  stopPlayback();
-  performed = [];
-  events = [];
-  currentChord = null;
-  log('Cleared session.');
-  render();
-});
-
-timeSigSelect.addEventListener('change', render);
 
 function requantize() {
   rebuildEvents();
   render();
 }
+
+function onNoteOn(pitch) {
+  const now = performance.now();
+  const { vexKey, display } = midiToKey(pitch);
+  const stillHeld = heldNotes.get(pitch);
+  if (stillHeld) stillHeld.release = now;
+  const note = { pitch, vexKey, display, onset: now, release: null };
+  notesPlayed.push(note);
+  heldNotes.set(pitch, note);
+  if (autoTempoToggle.checked) applyAutoTempo();
+  requantize();
+}
+
+function onNoteOff(pitch) {
+  const note = heldNotes.get(pitch);
+  if (!note) return;
+  note.release = performance.now();
+  heldNotes.delete(pitch);
+  requantize();
+}
+
+document.getElementById('clearBtn').addEventListener('click', () => {
+  stopPlayback();
+  notesPlayed = [];
+  heldNotes.clear();
+  chords = [];
+  events = [];
+  loggedChords = 0;
+  log('Cleared session.');
+  render();
+});
+
+timeSigSelect.addEventListener('change', render);
 tempoInput.addEventListener('change', requantize);
 
 // ---------- Auto tempo ----------
 
 const TEMPO_MIN = 40;
-const TEMPO_MAX = 220;
+const TEMPO_MAX = 200;
+const TEMPO_PRIOR_CENTER = 100;
+const TEMPO_PRIOR_WEIGHT = 0.3;
 const IOI_RATIOS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
-const IOI_RATIO_PENALTY = { 0.25: 0.35, 0.5: 0.1, 0.75: 0.25, 1: 0, 1.5: 0.2, 2: 0.1, 3: 0.3, 4: 0.3 };
-const PAUSE_MS = 3000;
+const IOI_RATIO_PENALTY = { 0.25: 0.35, 0.5: 0.1, 0.75: 0.5, 1: 0, 1.5: 0.2, 2: 0.1, 3: 0.3, 4: 0.3 };
 const MIN_IOIS_FOR_AUTO = 4;
 
 // Picks the BPM at which the inter-onset intervals best fit simple note values
@@ -225,7 +260,7 @@ function estimateTempo(iois) {
   let bestCost = Infinity;
   for (let bpm = TEMPO_MIN; bpm <= TEMPO_MAX; bpm++) {
     const beat = 60000 / bpm;
-    let cost = 0.15 * Math.abs(Math.log2(bpm / 100)) * iois.length;
+    let cost = TEMPO_PRIOR_WEIGHT * Math.abs(Math.log2(bpm / TEMPO_PRIOR_CENTER)) * iois.length;
     for (const ioi of iois) {
       const r = ioi / beat;
       let c = Infinity;
@@ -241,22 +276,23 @@ function estimateTempo(iois) {
   return best;
 }
 
-function performedIois() {
+function chordIois() {
+  const list = groupChords(notesPlayed);
   const iois = [];
-  for (let i = 1; i < performed.length; i++) {
-    const ioi = performed[i].onsetTime - performed[i - 1].onsetTime;
+  for (let i = 1; i < list.length; i++) {
+    const ioi = list[i].onsetTime - list[i - 1].onsetTime;
     if (ioi < PAUSE_MS) iois.push(ioi);
   }
   return iois;
 }
 
 function applyAutoTempo() {
-  const iois = performedIois();
+  const iois = chordIois();
   if (iois.length < MIN_IOIS_FOR_AUTO) return;
   const bpm = estimateTempo(iois);
   if (bpm === Number(tempoInput.value)) return;
   tempoInput.value = bpm;
-  log(`Auto tempo: ${bpm} BPM — re-quantized ${performed.length} chord${performed.length === 1 ? '' : 's'}.`);
+  log(`Auto tempo: ${bpm} BPM — re-quantized ${iois.length + 1} chords.`);
 }
 
 function syncTempoControls() {
@@ -268,8 +304,8 @@ function syncTempoControls() {
     metronomeToggle.checked = false;
     stopMetronome();
     applyAutoTempo();
-    requantize();
   }
+  requantize();
 }
 autoTempoToggle.addEventListener('change', syncTempoControls);
 
@@ -827,7 +863,12 @@ document.getElementById('exportLog').addEventListener('click', () => {
     tempo: Number(tempoInput.value),
     timeSignature: timeSigSelect.value,
     autoTempo: autoTempoToggle.checked,
-    performed: performed.map((c) => ({
+    notes: notesPlayed.map((n) => ({
+      note: n.display,
+      onset: Math.round(n.onset),
+      release: n.release == null ? null : Math.round(n.release),
+    })),
+    chords: chords.map((c) => ({
       onsetTime: Math.round(c.onsetTime),
       releaseTime: c.releaseTime == null ? null : Math.round(c.releaseTime),
       notes: [...c.notes.values()].map((n) => n.display),
