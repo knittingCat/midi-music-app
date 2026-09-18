@@ -13,8 +13,8 @@ const CHORD_HOLD_MS = 150;    // earlier chord notes must stay held this long af
 const PAUSE_MS = 3000;
 const REST_MIN_BEATS = 0.5;
 const RUN_TOLERANCE = 1.5;    // intervals within this ratio of the run's average share its value
+const RUN_MAX_BEATS = 2;      // longer chords are quantized on their own, never equalized as a run
 const TRIPLET_VALUES = [1 / 3, 2 / 3]; // eighth-note and quarter-note triplets
-const TRIPLET_BIAS = 0.05;    // log2 margin a triplet fit must beat the straight fit by
 const TRIPLET_EVENNESS = 1.3; // every note of a triplet run must be within this ratio of the run's average
 const EPS = 1e-6;
 
@@ -31,7 +31,9 @@ const DURATIONS = [
   { beats: 0.25, code: '16', dotted: false },
 ];
 const MIN_BEATS = 0.25;
-const MAX_BEATS = 4;
+const MAX_BEATS = 16; // a single note or rest may span this many beats; measures split and tie it
+// Values beyond a whole note for long held chords (written tied across bars).
+const LONG_VALUES = [5, 6, 7, 8, 10, 12, 16];
 
 // notesPlayed: raw performance, [{ pitch, vexKey, display, velocity, onset, release|null }]
 // chords (derived): [{ onsetTime, releaseTime|null, notes: Map(pitch -> {vexKey, display, velocity}) }]
@@ -60,25 +62,7 @@ function quarterMs() {
   return 60000 / (Number(tempoInput.value) || 120);
 }
 
-function nearestBeats(rawBeats, allowed) {
-  const ratio = Math.min(Math.max(rawBeats, MIN_BEATS), MAX_BEATS);
-  let best = allowed[0];
-  let bestDist = Infinity;
-  for (const beats of allowed) {
-    const dist = Math.abs(Math.log2(ratio) - Math.log2(beats));
-    if (dist < bestDist) { bestDist = dist; best = beats; }
-  }
-  return best;
-}
-
 const NOTE_VALUES = DURATIONS.filter((d) => !(d.dotted && d.beats < 0.5)).map((d) => d.beats);
-
-// A dotted eighth only makes sense paired with a sixteenth; otherwise it is a
-// slightly long eighth or a short quarter.
-function quantizeNoteBeats(rawBeats, nextRawBeats) {
-  const pairedWithSixteenth = nextRawBeats != null && nextRawBeats <= 0.4;
-  return nearestBeats(rawBeats, pairedWithSixteenth ? NOTE_VALUES : NOTE_VALUES.filter((b) => b !== 0.75));
-}
 
 function quantizeRestBeats(rawBeats) {
   return Math.min(Math.round(rawBeats / MIN_BEATS) * MIN_BEATS, MAX_BEATS);
@@ -173,63 +157,123 @@ function chordRaw(chord, nextOnsetTime) {
 
 // Group consecutive legato chords whose spacing stays within RUN_TOLERANCE of
 // the run's running average, so a slightly uneven trill or scale is one run.
+// A chord that ends in a rest may close the run as its last member when it was
+// held no longer than the run's spacing (a staccato last note); its held time
+// is not added to the average.
 function findRuns(raws) {
   const runs = [];
   let run = null;
   raws.forEach((raw, i) => {
-    const inRun = run && raw.legato && Math.abs(Math.log2(raw.note / (run.sum / run.count))) < Math.log2(RUN_TOLERANCE);
-    if (inRun) {
+    const avg = run && run.sum / run.count;
+    const fits = run && raw.note <= RUN_MAX_BEATS && Math.abs(Math.log2(raw.note / avg)) < Math.log2(RUN_TOLERANCE);
+    if (run && raw.legato && fits) {
       run.sum += raw.note;
       run.count++;
       run.end = i;
+    } else if (run && !raw.legato && raw.rest && raw.note <= avg * RUN_TOLERANCE) {
+      run.end = i;
+      run.trailing = true;
+      run = null;
     } else {
-      run = { start: i, end: i, sum: raw.note, count: 1 };
+      run = { start: i, end: i, sum: raw.note, count: 1, trailing: false };
       runs.push(run);
-      if (!raw.legato) run = null;
+      if (!raw.legato || raw.note > RUN_MAX_BEATS) run = null;
     }
   });
   return runs;
 }
 
-// Decide the value of every chord in a run. A run of three or more notes whose
-// average spacing fits a triplet better than a straight value becomes triplet
-// groups of three, as long as each group fits inside the current measure.
-// Leftover notes (and groups that would cross a barline) get the straight value.
-function planRun(run, raws, pos) {
-  const avg = run.sum / run.count;
-  const nextRaw = run.count === 1 ? raws[run.end + 1]?.note ?? null : null;
-  const straight = quantizeNoteBeats(avg, nextRaw);
-  const plan = new Array(run.count).fill(null).map(() => ({ beats: straight }));
-  if (run.count < 3) return plan;
+const MAX_DRIFT_BEATS = 0.5;    // how far the written score may run ahead of / behind the playing
+const NOTE_DRIFT_SHARE = 0.5;   // notes only make up part of the drift; rests absorb the remainder
+const DRIFT_DECAY = 0.75;       // per event: old timing error fades so a rushed phrase doesn't distort a later one
+const TRIPLET_BIAS_BEATS = 0.02; // per note, a triplet reading must beat the straight one by this much
 
-  const tri = nearestBeats(avg, TRIPLET_VALUES);
-  const dStraight = Math.abs(Math.log2(avg / straight));
-  const dTri = Math.abs(Math.log2(avg / tri));
-  if (dTri + TRIPLET_BIAS >= dStraight) return plan;
-  const members = raws.slice(run.start, run.end + 1).map((r) => r.note);
-  if (members.some((b) => Math.abs(Math.log2(b / avg)) > Math.log2(TRIPLET_EVENNESS))) return plan;
+// The two candidate values either side of avg: the largest allowed value <= avg
+// and the smallest >= avg. Choosing only between neighbours keeps every note a
+// plausible reading of what was played, even when drift correction is applied.
+function neighbourValues(avg, allowed) {
+  const sorted = [...allowed].sort((a, b) => a - b);
+  const a = Math.min(Math.max(avg, sorted[0]), sorted[sorted.length - 1]);
+  const lo = sorted.filter((v) => v <= a + EPS).pop();
+  const hi = sorted.find((v) => v >= a - EPS);
+  return lo === hi ? [lo] : [lo, hi];
+}
+
+// Value for every chord of a run, plus any triplet rests needed to complete a
+// partial triplet group before the rest that follows the run.
+// Returns { plan: [{ beats, tupletId? }], tripletRests: n, restValue, drift }.
+// `drift` is the running (played - written) length in beats: the run's total
+// written length is chosen so the score keeps pace with the performance.
+function planRun(run, raws, pos, drift) {
+  const members = raws.slice(run.start, run.end + 1);
+  const count = members.length;
+  const rawTotal = members.reduce((s, r) => s + r.note, 0);
+  const legato = run.trailing ? members.slice(0, -1) : members;
+  const avg = legato.reduce((s, r) => s + r.note, 0) / legato.length;
+  const target = rawTotal + drift * NOTE_DRIFT_SHARE;
+  const nextRaw = count === 1 ? raws[run.end + 1]?.note ?? null : null;
+  // A dotted eighth only makes sense paired with a sixteenth; otherwise it is a
+  // slightly long eighth or a short quarter.
+  const pairedWithSixteenth = nextRaw != null && nextRaw <= 0.4;
+  const straight = (pairedWithSixteenth ? NOTE_VALUES : NOTE_VALUES.filter((b) => b !== 0.75)).concat(LONG_VALUES);
+
+  const even = legato.every((r) => Math.abs(Math.log2(r.note / avg)) <= Math.log2(TRIPLET_EVENNESS));
+  const tripletsAllowed = count >= 3 && even;
+  const candidates = tripletsAllowed ? straight.concat(TRIPLET_VALUES) : straight;
+  const isTriplet = (v) => TRIPLET_VALUES.some((t) => Math.abs(t - v) < EPS);
+  const cost = (v) => Math.abs(count * v - target) + (isTriplet(v) ? TRIPLET_BIAS_BEATS * count : 0);
+  let value = neighbourValues(avg, candidates).sort((a, b) => cost(a) - cost(b))[0];
 
   const capacity = timeSigBeatsInQuarters();
-  const groupBeats = tri * 3;
-  // Leftover notes take the nearest straight value; a group that would cross a
-  // barline takes the straight value just below the triplet (its total is
-  // closer to the group's real length than the value above would be).
-  const plain = nearestBeats(avg, NOTE_VALUES.filter((b) => b !== 0.75));
-  const squeezed = tri < 0.5 ? 0.25 : 0.5;
+  const inMeasure = (p) => p - Math.floor(p / capacity + EPS) * capacity;
+  const plan = [];
+  let tripletRests = 0;
+  let restValue = 0;
   let p = pos;
-  for (let i = 0; i < run.count; i++) plan[i] = { beats: plain };
-  for (let i = 0; i + 3 <= run.count; i += 3) {
-    const inMeasure = p - Math.floor(p / capacity + EPS) * capacity;
-    if (inMeasure + groupBeats <= capacity + EPS) {
-      const tupletId = nextTupletId++;
-      for (let k = 0; k < 3; k++) plan[i + k] = { beats: tri, tupletId };
-      p += groupBeats;
-    } else {
-      for (let k = 0; k < 3; k++) plan[i + k] = { beats: squeezed };
-      p += squeezed * 3;
+
+  if (isTriplet(value)) {
+    const groupBeats = value * 3;
+    const squeezed = value < 0.5 ? 0.25 : 0.5;
+    const full = Math.floor(count / 3);
+    const remainder = count - full * 3;
+    for (let g = 0; g < full; g++) {
+      if (inMeasure(p) + groupBeats <= capacity + EPS) {
+        const tupletId = nextTupletId++;
+        for (let k = 0; k < 3; k++) plan.push({ beats: value, tupletId });
+        p += groupBeats;
+      } else {
+        for (let k = 0; k < 3; k++) plan.push({ beats: squeezed });
+        p += squeezed * 3;
+      }
     }
+    if (remainder > 0) {
+      const last = members[count - 1];
+      const restRaw = run.trailing ? last.rest - value : 0;
+      const restsNeeded = 3 - remainder;
+      const canFill = run.trailing && restRaw >= restsNeeded * value * 0.75 && inMeasure(p) + groupBeats <= capacity + EPS;
+      if (canFill) {
+        const tupletId = nextTupletId++;
+        for (let k = 0; k < remainder; k++) plan.push({ beats: value, tupletId });
+        tripletRests = restsNeeded;
+        restValue = value;
+        plan.tupletId = tupletId;
+        p += groupBeats;
+      } else {
+        const plain = neighbourValues(avg, straight).sort((a, b) => cost(a) - cost(b))[0];
+        for (let k = 0; k < remainder; k++) plan.push({ beats: plain });
+        p += plain * remainder;
+      }
+    }
+  } else {
+    for (let k = 0; k < count; k++) plan.push({ beats: value });
+    p += value * count;
   }
-  return plan;
+  const written = p - pos - tripletRests * restValue;
+  return { plan, tripletRests, restValue, drift: clampDrift(drift + rawTotal - written) };
+}
+
+function clampDrift(d) {
+  return Math.max(-MAX_DRIFT_BEATS, Math.min(MAX_DRIFT_BEATS, d)) * DRIFT_DECAY;
 }
 
 let nextTupletId = 0;
@@ -237,30 +281,48 @@ let nextTupletId = 0;
 function buildEvents(chordList) {
   const raws = chordList.map((c, i) => chordRaw(c, chordList[i + 1]?.onsetTime ?? null));
   nextTupletId = 0;
-  const planFor = new Array(raws.length);
-  const runs = findRuns(raws);
+  const capacity = timeSigBeatsInQuarters();
   const out = [];
-  let pos = 0; // beats since the start, to keep triplet groups inside a measure
-  let runIdx = 0;
-  chordList.forEach((chord, i) => {
-    if (runIdx < runs.length && runs[runIdx].start === i) {
-      const run = runs[runIdx++];
-      planRun(run, raws, pos).forEach((pl, k) => { planFor[run.start + k] = pl; });
-    }
-    const { treble, bass, velocities } = splitChordByClef(chord.notes);
-    const raw = raws[i];
-    const { beats, tupletId } = planFor[i];
-    out.push({ treble, bass, velocities, beats, tupletId, rawBeats: raw.note, chordIndex: i });
+  let pos = 0;   // beats written so far
+  let drift = 0; // beats played minus beats written, bounded by MAX_DRIFT_BEATS
+  const rest = (beats, rawBeats, chordIndex, extra = {}) => {
+    out.push({ treble: [], bass: [], beats, rawBeats, chordIndex, ...extra });
     pos += beats;
-    if (raw.rest) {
-      const restRaw = raw.rest - beats;
-      const restBeats = quantizeRestBeats(restRaw);
-      if (restBeats >= MIN_BEATS - EPS) {
-        out.push({ treble: [], bass: [], beats: restBeats, rawBeats: restRaw, chordIndex: i });
-        pos += restBeats;
-      }
+  };
+
+  for (const run of findRuns(raws)) {
+    const planned = planRun(run, raws, pos, drift);
+    drift = planned.drift;
+    planned.plan.forEach((pl, k) => {
+      const i = run.start + k;
+      const chord = chordList[i];
+      const { treble, bass, velocities } = splitChordByClef(chord.notes);
+      out.push({ treble, bass, velocities, beats: pl.beats, tupletId: pl.tupletId, rawBeats: raws[i].note, chordIndex: i });
+      pos += pl.beats;
+    });
+
+    const last = run.end;
+    const raw = raws[last];
+    if (!raw.rest) continue;
+    let restRaw = raw.rest - planned.plan[planned.plan.length - 1].beats;
+    for (let k = 0; k < planned.tripletRests; k++) {
+      rest(planned.restValue, restRaw / planned.tripletRests, last, { tupletId: planned.plan.tupletId });
+      restRaw -= planned.restValue;
     }
-  });
+
+    const gapMs = (chordList[last + 1].onsetTime - chordList[last].releaseTime);
+    if (gapMs > PAUSE_MS) {
+      // A long pause ends the phrase: finish the bar with rests and start the
+      // next one fresh, instead of writing the pause out as rests.
+      const fill = capacity - (pos - Math.floor(pos / capacity + EPS) * capacity);
+      if (fill > EPS && fill < capacity - EPS) rest(fill, restRaw, last, { sectionBreak: true });
+      drift = 0;
+      continue;
+    }
+    const restBeats = quantizeRestBeats(restRaw + drift);
+    if (restBeats >= MIN_BEATS - EPS) rest(restBeats, restRaw, last);
+    drift = clampDrift(drift + restRaw - restBeats);
+  }
   return out;
 }
 
@@ -281,6 +343,10 @@ function logNewChords(complete) {
     const names = [...chord.notes.values()].map((n) => n.display).join(' ');
     for (const ev of events.filter((e) => e.chordIndex === i)) {
       const isRest = ev.treble.length === 0 && ev.bass.length === 0;
+      if (ev.sectionBreak) {
+        log(`Pause of ${(ev.rawBeats * quarterMs() / 1000).toFixed(1)}s — bar completed with ${beatsLabel(ev.beats)} rest, new phrase`);
+        continue;
+      }
       log(`${isRest ? 'Rest' : names}: ${timingLabel(ev.rawBeats, ev.beats, ev.tupletId != null)}`);
     }
   }
