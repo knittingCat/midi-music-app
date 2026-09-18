@@ -10,9 +10,9 @@ Plug in a MIDI keyboard, play, and watch your notes appear as sheet music on a g
 tlib install knittingCat/midi-music-app
 ```
 
- See [Bluegrayfoo/TLIB](https://github.com/BlueGrayFoo/TLIB) for TLIB itself.
+That gives you two commands: `midi-music-app` (start) and `midi-music-app-stop` (stop). Run `tlib install knittingCat/midi-music-app` again at any time to update.
 
-That gives you two commands: `midi-music-app` (start) and `midi-music-app-stop` (stop). Run `tlib install knittingCat/midi-music-app` again any time to update.
+See [Bluegrayfoo/TLIB](https://github.com/Bluegrayfoo/TLIB) for TLIB itself.
 
 ### Without tlib
 
@@ -31,7 +31,7 @@ npm install
 | With tlib | `midi-music-app` | `midi-music-app-stop` |
 | Without tlib | `npm start` (from inside the cloned repo) | Ctrl+C |
 
-Then open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported in Safari or Firefox), allow MIDI access when prompted, click once anywhere on the page so the browser lets audio start, and play.
+Then open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported in Safari or Firefox), allow MIDI access when prompted, click once anywhere on the page so the browser will allow audio, and play.
 
 ## Controls
 
@@ -54,9 +54,9 @@ Then open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported
 
 - The browser reads your keyboard through the Web MIDI API; the Node server just serves the page and the vendored libraries.
 - Notes played within 60 ms of each other are grouped into a chord.
-- Rhythm comes from the time between note onsets, snapped to the nearest value from whole to 16th (including dotted) at the tempo you set. A gap of at least an eighth note between releasing a key and pressing the next becomes a rest; shorter gaps are treated as legato.
+- Rhythm comes from the time between note onsets, snapped to the nearest value from whole to 16th (including dotted) at the tempo you set. A gap of at least an eighth note between releasing a key and pressing the next one becomes a rest; shorter gaps are treated as legato.
 - Notes at or above middle C go on the treble staff; everything below goes on the bass staff. Notes that cross a barline are split and tied.
-- The log under the score shows, for every note, how long you actually held it versus what it was written as, so you can see how far off the quantization was and adjust the tempo.
+- The log under the score shows, for every note, how long you actually held it versus how it was written, so you can see how far off the quantization was and adjust the tempo.
 - The last chord you play is finalized automatically after ~1 s of silence, or immediately with **Finalize current chord**.
 
 ## Credits
