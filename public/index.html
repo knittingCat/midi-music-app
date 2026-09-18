@@ -41,6 +41,9 @@
       <option value="6/8">6/8</option>
     </select>
   </label>
+  <label style="flex-direction:row;align-items:center;gap:6px">
+    <input type="checkbox" id="liveSound" checked /> Live piano sound
+  </label>
   <button id="playBtn">&#9654; Play</button>
   <button id="finalizeBtn" class="secondary">Finalize current chord</button>
   <button id="clearBtn" class="secondary">Clear</button>
@@ -54,6 +57,7 @@
 
 <script src="/vendor/vexflow.js"></script>
 <script src="/vendor/midiwriter.js"></script>
+<script src="/vendor/acoustic_grand_piano-mp3.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

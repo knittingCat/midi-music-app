@@ -251,13 +251,23 @@ function attachInput(input) {
     const [status, data1, data2] = msg.data;
     const command = status & 0xf0;
     if (command === 0x90 && data2 > 0) {
+      liveNoteOn(data1, data2);
       onNoteOn(data1, data2);
     } else if (command === 0x80 || (command === 0x90 && data2 === 0)) {
+      liveNoteOff(data1);
       onNoteOff(data1);
     }
   };
-  setStatus(`Connected: ${input.name}`, 'connected');
+  connectedName = input.name;
+  refreshStatus();
   log(`Listening on "${input.name}"`);
+}
+
+let connectedName = null;
+function refreshStatus() {
+  if (!connectedName) return;
+  const hint = audioCtx.state === 'suspended' ? ' — click anywhere on the page to enable sound' : '';
+  setStatus(`Connected: ${connectedName}${hint}`, 'connected');
 }
 
 function populateDevices(midiAccess) {
@@ -296,58 +306,118 @@ if (navigator.requestMIDIAccess) {
 // ---------- Playback ----------
 
 const playBtn = document.getElementById('playBtn');
-let audioCtx = null;
+const liveSoundToggle = document.getElementById('liveSound');
+const PIANO_SAMPLES = MIDI.Soundfont.acoustic_grand_piano;
+const SHARP_TO_FLAT = { 'c#': 'Db', 'd#': 'Eb', 'f#': 'Gb', 'g#': 'Ab', 'a#': 'Bb' };
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+audioCtx.onstatechange = refreshStatus;
+const sampleCache = new Map();
+const liveVoices = new Map();
+let activeSources = [];
 let playbackEndTimer = null;
+let isPlaying = false;
 
-function vexKeyToFrequency(vexKey) {
+function vexKeyToSampleName(vexKey) {
   const [name, octave] = vexKey.split('/');
-  const midi = NOTE_NAMES.indexOf(name) + (Number(octave) + 1) * 12;
-  return 440 * Math.pow(2, (midi - 69) / 12);
+  const letter = SHARP_TO_FLAT[name] || name.toUpperCase();
+  return `${letter}${octave}`;
 }
 
-function scheduleTone(ctx, freq, startAt, durationSec) {
-  const osc = ctx.createOscillator();
+async function loadSample(ctx, sampleName) {
+  if (sampleCache.has(sampleName)) return sampleCache.get(sampleName);
+  const dataUri = PIANO_SAMPLES[sampleName];
+  if (!dataUri) return null;
+  const bytes = await (await fetch(dataUri)).arrayBuffer();
+  const buffer = await ctx.decodeAudioData(bytes);
+  sampleCache.set(sampleName, buffer);
+  return buffer;
+}
+
+Promise.all(Object.keys(PIANO_SAMPLES).map((n) => loadSample(audioCtx, n)))
+  .then(() => log('Piano samples loaded.'));
+
+function unlockAudio() {
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+document.addEventListener('click', unlockAudio);
+document.addEventListener('keydown', unlockAudio);
+
+function liveNoteOn(pitch, velocity) {
+  if (!liveSoundToggle.checked) return;
+  unlockAudio();
+  const buffer = sampleCache.get(vexKeyToSampleName(midiToKey(pitch).vexKey));
+  if (!buffer) return;
+  liveNoteOff(pitch);
+  const source = audioCtx.createBufferSource();
+  const gain = audioCtx.createGain();
+  source.buffer = buffer;
+  gain.gain.value = Math.pow(velocity / 127, 1.5);
+  source.connect(gain).connect(audioCtx.destination);
+  source.start();
+  liveVoices.set(pitch, { source, gain });
+}
+
+function liveNoteOff(pitch) {
+  const voice = liveVoices.get(pitch);
+  if (!voice) return;
+  liveVoices.delete(pitch);
+  const now = audioCtx.currentTime;
+  voice.gain.gain.setValueAtTime(voice.gain.gain.value, now);
+  voice.gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+  voice.source.stop(now + 0.3);
+}
+
+function scheduleSample(ctx, buffer, startAt, durationSec) {
+  const source = ctx.createBufferSource();
   const gain = ctx.createGain();
-  osc.type = 'triangle';
-  osc.frequency.value = freq;
-  const release = Math.min(0.08, durationSec * 0.3);
-  gain.gain.setValueAtTime(0, startAt);
-  gain.gain.linearRampToValueAtTime(0.18, startAt + 0.01);
-  gain.gain.setValueAtTime(0.18, startAt + durationSec - release);
-  gain.gain.linearRampToValueAtTime(0, startAt + durationSec);
-  osc.connect(gain).connect(ctx.destination);
-  osc.start(startAt);
-  osc.stop(startAt + durationSec);
+  source.buffer = buffer;
+  const release = 0.25;
+  gain.gain.setValueAtTime(1, startAt);
+  gain.gain.setValueAtTime(1, startAt + durationSec);
+  gain.gain.exponentialRampToValueAtTime(0.001, startAt + durationSec + release);
+  source.connect(gain).connect(ctx.destination);
+  source.start(startAt);
+  source.stop(startAt + durationSec + release);
+  activeSources.push(source);
 }
 
 function stopPlayback() {
   clearTimeout(playbackEndTimer);
   playbackEndTimer = null;
-  if (audioCtx) {
-    audioCtx.close();
-    audioCtx = null;
+  for (const src of activeSources) {
+    try { src.stop(); } catch (_) {}
   }
+  activeSources = [];
+  isPlaying = false;
   playBtn.innerHTML = '&#9654; Play';
 }
 
-function startPlayback() {
+async function startPlayback() {
   const tempo = Number(tempoInput.value) || 120;
   const quarterSec = 60 / tempo;
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+  isPlaying = true;
+  playBtn.innerHTML = '&#9632; Stop';
+
+  const neededKeys = new Set(events.flatMap((ev) => [...ev.treble, ...ev.bass]));
+  await Promise.all([...neededKeys].map((k) => loadSample(audioCtx, vexKeyToSampleName(k))));
+  if (!isPlaying) return;
+
   let t = audioCtx.currentTime + 0.05;
   for (const ev of events) {
     const durationSec = durationBeats(ev.duration) * quarterSec;
     for (const key of [...ev.treble, ...ev.bass]) {
-      scheduleTone(audioCtx, vexKeyToFrequency(key), t, durationSec);
+      const buffer = sampleCache.get(vexKeyToSampleName(key));
+      if (buffer) scheduleSample(audioCtx, buffer, t, durationSec);
     }
     t += durationSec;
   }
-  playBtn.innerHTML = '&#9632; Stop';
-  playbackEndTimer = setTimeout(stopPlayback, (t - audioCtx.currentTime) * 1000 + 100);
+  playbackEndTimer = setTimeout(stopPlayback, (t - audioCtx.currentTime) * 1000 + 300);
 }
 
 playBtn.addEventListener('click', () => {
-  if (audioCtx) { stopPlayback(); return; }
+  if (isPlaying) { stopPlayback(); return; }
   if (events.length === 0) { log('Nothing to play yet.'); return; }
   startPlayback();
 });

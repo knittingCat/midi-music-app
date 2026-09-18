@@ -51,7 +51,12 @@ Either way, open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not su
 | MIDI input | Choose which device to listen to |
 | Tempo | Reference BPM used to quantize durations |
 | Time signature | Bar length used for measure breaks |
-| Play / Stop | Play back the transcription with a built-in synth at the set tempo |
+| Live piano sound | Hear a sampled piano as you play (browsers require one click on the page before audio starts) |
+| Play / Stop | Play back the transcription with the same piano at the set tempo |
 | Finalize current chord | Commit the chord currently being held |
 | Clear | Start a new session |
 | Export MusicXML / MIDI | Download the transcription |
+
+## Credits
+
+Piano samples are the FluidR3_GM acoustic grand piano from [gleitz/midi-js-soundfonts](https://github.com/gleitz/midi-js-soundfonts) (MIT), vendored in `public/vendor/` so the app works offline.
