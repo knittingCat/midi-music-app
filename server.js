@@ -44,7 +44,7 @@ function listen(port, triesLeft) {
   });
 }
 
-for (const signal of ['SIGINT', 'SIGTERM']) {
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
     cleanupPidFile();
     process.exit(0);
