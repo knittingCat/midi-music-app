@@ -2,27 +2,46 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
+<meta name="color-scheme" content="light dark" />
 <title>MIDI Sheet Music Transcriber</title>
 <style>
-  body { font-family: -apple-system, Helvetica, Arial, sans-serif; margin: 0; background: #f4f3ef; color: #222; }
-  header { background: #202124; color: #fff; padding: 16px 24px; }
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f3ef; --fg: #222; --muted: #555; --faint: #777;
+    --panel: #fff; --border: #ddd; --control-bg: #fff; --control-border: #ccc;
+    --header-bg: #202124; --header-fg: #fff;
+    --accent: #2d6cdf; --accent-hover: #1f52ab; --secondary: #6b6b6b; --secondary-hover: #4d4d4d; --disabled: #aaa;
+    --ok: #1a7f37; --error: #c62828;
+    --paper: #fff; /* the score stays on white paper in both modes */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1c1e; --fg: #e6e6e6; --muted: #b0b0b0; --faint: #8a8a8a;
+      --panel: #2a2a2d; --border: #3d3d42; --control-bg: #3a3a3e; --control-border: #55555a;
+      --header-bg: #111; --header-fg: #f2f2f2;
+      --accent: #3b7ff0; --accent-hover: #5c95f5; --secondary: #5a5a5f; --secondary-hover: #737379; --disabled: #48484c;
+      --ok: #4cc26b; --error: #ff6b60;
+    }
+  }
+  body { font-family: -apple-system, Helvetica, Arial, sans-serif; margin: 0; background: var(--bg); color: var(--fg); }
+  header { background: var(--header-bg); color: var(--header-fg); padding: 16px 24px; }
   header h1 { margin: 0; font-size: 20px; }
-  .toolbar { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; padding: 14px 24px; background: #fff; border-bottom: 1px solid #ddd; }
-  .toolbar label { font-size: 13px; color: #555; display: flex; flex-direction: column; gap: 4px; }
-  select, input[type=number], button { font-size: 14px; padding: 6px 10px; border-radius: 6px; border: 1px solid #ccc; background: #fff; }
-  button { cursor: pointer; background: #2d6cdf; color: #fff; border: none; }
-  button:hover { background: #1f52ab; }
-  button.secondary { background: #6b6b6b; }
-  button.secondary:hover { background: #4d4d4d; }
-  button:disabled { background: #aaa; cursor: not-allowed; }
-  #status { font-size: 13px; padding: 0 24px; color: #555; }
-  #status.connected { color: #1a7f37; }
-  #status.error { color: #c62828; }
-  #staffScroll { overflow-x: auto; background: #fff; margin: 20px 24px; border: 1px solid #ddd; border-radius: 8px; padding: 10px; min-height: 220px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; padding: 14px 24px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  .toolbar label { font-size: 13px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+  select, input[type=number], button { font-size: 14px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--control-border); background: var(--control-bg); color: var(--fg); }
+  button { cursor: pointer; background: var(--accent); color: #fff; border: none; }
+  button:hover { background: var(--accent-hover); }
+  button.secondary { background: var(--secondary); }
+  button.secondary:hover { background: var(--secondary-hover); }
+  button:disabled { background: var(--disabled); cursor: not-allowed; }
+  #status { font-size: 13px; padding: 0 24px; color: var(--muted); }
+  #status.connected { color: var(--ok); }
+  #status.error { color: var(--error); }
+  #staffScroll { overflow-x: auto; background: var(--paper); margin: 20px 24px; border: 1px solid var(--border); border-radius: 8px; padding: 10px; min-height: 220px; }
   #notation { display: block; }
-  #log { margin: 0 24px 24px; font-size: 12px; color: #777; max-height: 80px; overflow-y: auto; white-space: pre-wrap; font-family: ui-monospace, monospace; }
-  .export-group { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #555; }
-  #tapTempoBtn.tapping { background: #2d6cdf; color: #fff; }
+  #log { margin: 0 24px 24px; font-size: 12px; color: var(--faint); max-height: 80px; overflow-y: auto; white-space: pre-wrap; font-family: ui-monospace, monospace; }
+  .export-group { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  #tapTempoBtn.tapping { background: var(--accent); color: #fff; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
   .playing text { fill: #d8321f; }
   .playing path { stroke: #d8321f; }

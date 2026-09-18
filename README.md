@@ -2,11 +2,13 @@
 
 Plug in a MIDI keyboard, play, and watch your notes appear as sheet music on a grand staff in real time, with a sampled piano sounding as you play. Play it back with the notes highlighted as they sound, and save the result as MusicXML, MIDI, PDF, or MP3.
 
+**Use it now: [https://midi-music-app.onrender.com/](https://midi-music-app.onrender.com/)** (Chrome or Edge, with a MIDI keyboard plugged in).
+
 The whole app runs in the browser: `public/` is a self-contained static site (page, script, and vendored libraries), so it can be hosted anywhere static files can, or run locally through the small Node launcher.
 
 ## Hosted (static site)
 
-Deploy the `public/` directory as a static site — no build step. `render.yaml` in the repo is a [Render](https://render.com) blueprint that does exactly that (publish directory `./public`); creating a Static Site by hand with publish directory `public` and an empty build command works too. Web MIDI needs a secure context, which any `https://` host provides.
+The site above is deployed on Render from this repo's `main` branch and updates on every push. To host your own copy, deploy the `public/` directory as a static site — no build step. `render.yaml` in the repo is a [Render](https://render.com) blueprint that does exactly that (publish directory `./public`); creating a Static Site by hand with publish directory `public` and an empty build command works too. Web MIDI needs a secure context, which any `https://` host provides.
 
 ## Run locally
 
@@ -45,7 +47,7 @@ npm install
 
 The server binds to `127.0.0.1:3000`. If that port is busy it takes the next free one (up to 3020) and prints the URL it chose; you can also pick one with `midi-music-app --port 8080` or `PORT=8080 npm start`. `midi-music-app-stop` stops only this app's server, never whatever else might be on the port.
 
-Then open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported in Safari or Firefox), allow MIDI access when prompted, click once anywhere on the page so the browser will allow audio, and play.
+Then open http://localhost:3000 (or the hosted URL above) in **Chrome or Edge** (Web MIDI is not supported in Safari or Firefox), allow MIDI access when prompted, click once anywhere on the page so the browser will allow audio, and play.
 
 ## Controls
 
