@@ -356,27 +356,44 @@ function render(rowMaxWidth) {
 
 // ---------- Tempo calibration ----------
 
-const CALIBRATION_HITS = 8;
+const CALIBRATION_HITS = 12;
+const CALIBRATION_WARMUP = 2;
+const CALIBRATION_KEYS = ['c/3'];
 const tempoModal = document.getElementById('tempoModal');
 const tempoProgress = document.getElementById('tempoProgress');
+const tempoLive = document.getElementById('tempoLive');
 const tempoScoreEl = document.getElementById('tempoScore');
-let calibration = null; // { onsets: number[] }
+const tempoRetryBtn = document.getElementById('tempoRetryBtn');
+const tempoUseBtn = document.getElementById('tempoUseBtn');
+let calibration = null; // { onsets: number[], chordEls: Element[], result: number|null }
 
 function renderCalibrationScore() {
   tempoScoreEl.innerHTML = '';
-  const MEASURE_W = 260;
+  const MEASURE_W = 230;
+  const measures = CALIBRATION_HITS / 4;
   const renderer = new VF.Renderer(tempoScoreEl, VF.Renderer.Backends.SVG);
-  renderer.resize(MEASURE_W * 2 + 40, 130);
+  renderer.resize(MEASURE_W * measures + 40, 120);
   const ctx = renderer.getContext();
-  for (let m = 0; m < 2; m++) {
-    const stave = new VF.Stave(20 + m * MEASURE_W, 20, MEASURE_W);
-    if (m === 0) stave.addClef('treble').addTimeSignature('4/4');
+  const chordEls = [];
+  for (let m = 0; m < measures; m++) {
+    const stave = new VF.Stave(20 + m * MEASURE_W, 15, MEASURE_W);
+    if (m === 0) stave.addClef('bass').addTimeSignature('4/4');
     stave.setContext(ctx).draw();
-    const notes = Array.from({ length: 4 }, () => new VF.StaveNote({ keys: ['c/4', 'e/4', 'g/4'], duration: 'q' }));
+    const notes = Array.from({ length: 4 }, () => new VF.StaveNote({ keys: CALIBRATION_KEYS, duration: 'q', clef: 'bass' }));
     const voice = new VF.Voice({ numBeats: 4, beatValue: 4 }).addTickables(notes);
     new VF.Formatter().joinVoices([voice]).formatToStave([voice], stave);
     voice.draw(ctx, stave);
+    notes.forEach((n) => chordEls.push(n.getSVGElement()));
   }
+  return chordEls;
+}
+
+function resetCalibration() {
+  calibration = { onsets: [], chordEls: renderCalibrationScore(), result: null };
+  tempoProgress.textContent = 'Waiting for the first note…';
+  tempoLive.textContent = '';
+  tempoRetryBtn.hidden = true;
+  tempoUseBtn.hidden = true;
 }
 
 function startCalibration() {
@@ -386,9 +403,7 @@ function startCalibration() {
     currentChord = null;
   }
   lastChordReleaseTime = null;
-  calibration = { onsets: [] };
-  tempoProgress.textContent = 'Waiting for the first chord…';
-  renderCalibrationScore();
+  resetCalibration();
   tempoModal.hidden = false;
 }
 
@@ -397,27 +412,50 @@ function endCalibration() {
   tempoModal.hidden = true;
 }
 
+function bpmFromIntervals(intervals) {
+  const sorted = [...intervals].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  return Math.min(300, Math.max(20, Math.round(60000 / median)));
+}
+
 function calibrationNoteOn() {
+  if (calibration.result != null) return;
   const now = performance.now();
-  const { onsets } = calibration;
+  const { onsets, chordEls } = calibration;
   if (onsets.length && now - onsets[onsets.length - 1] <= CHORD_WINDOW_MS) return;
   onsets.push(now);
+  chordEls[onsets.length - 1].classList.add('playing');
 
+  const intervals = onsets.slice(1).map((t, i) => t - onsets[i]);
   if (onsets.length < CALIBRATION_HITS) {
-    tempoProgress.textContent = `${onsets.length} of ${CALIBRATION_HITS}`;
+    const phase = onsets.length <= CALIBRATION_WARMUP ? ' (warm-up)' : '';
+    tempoProgress.textContent = `${onsets.length} of ${CALIBRATION_HITS}${phase}`;
+    if (intervals.length) tempoLive.textContent = `Last beat: ${Math.round(60000 / intervals[intervals.length - 1])} BPM`;
     return;
   }
 
-  const intervals = onsets.slice(1).map((t, i) => t - onsets[i]).sort((a, b) => a - b);
-  const median = intervals[Math.floor(intervals.length / 2)];
-  const bpm = Math.min(300, Math.max(20, Math.round(60000 / median)));
-  tempoInput.value = bpm;
-  const spread = Math.round(60000 / intervals[0] - 60000 / intervals[intervals.length - 1]);
-  log(`Tempo set to ${bpm} BPM from ${CALIBRATION_HITS} chords (fastest–slowest spread ${spread} BPM).`);
-  endCalibration();
-  render();
+  const measured = intervals.slice(CALIBRATION_WARMUP);
+  const bpm = bpmFromIntervals(measured);
+  const fastest = Math.round(60000 / Math.min(...measured));
+  const slowest = Math.round(60000 / Math.max(...measured));
+  const unsteady = (fastest - slowest) / bpm > 0.15;
+  calibration.result = bpm;
+  tempoProgress.textContent = `Measured ${bpm} BPM`;
+  tempoLive.textContent = unsteady
+    ? `Your beats ranged from ${slowest} to ${fastest} BPM, which is quite uneven. Try again for a more reliable reading, or use it anyway.`
+    : `Steady: your beats ranged from ${slowest} to ${fastest} BPM.`;
+  tempoRetryBtn.hidden = false;
+  tempoUseBtn.hidden = false;
+  tempoUseBtn.focus();
 }
 
+tempoUseBtn.addEventListener('click', () => {
+  tempoInput.value = calibration.result;
+  log(`Tempo set to ${calibration.result} BPM by playing.`);
+  endCalibration();
+  render();
+});
+tempoRetryBtn.addEventListener('click', resetCalibration);
 document.getElementById('tempoTestBtn').addEventListener('click', startCalibration);
 document.getElementById('tempoCancelBtn').addEventListener('click', endCalibration);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && calibration) endCalibration(); });

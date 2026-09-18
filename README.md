@@ -49,7 +49,7 @@ Then open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported
 |---|---|
 | MIDI input | Choose which device to listen to |
 | Tempo | Reference BPM used to quantize durations (and for playback / MP3) |
-| Set by playing | Shows a C chord written as eight quarter notes; play along and the tempo is set from the median time between your chords |
+| Set by playing | Shows twelve quarter-note Cs in the bass clef with step-by-step instructions; play them with one left-hand finger and the tempo is measured from the median beat (first two are warm-up), with a steadiness check and a try-again option before it's applied |
 | Time signature | Bar length used for measure breaks |
 | Live piano sound | Hear a sampled piano as you play |
 | Play / Stop | Play back the transcription; the notes light up as they sound |
