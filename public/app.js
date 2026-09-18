@@ -30,8 +30,8 @@ const DURATIONS = [
 const MIN_BEATS = 0.25;
 const MAX_BEATS = 4;
 
-// notesPlayed: raw performance, [{ pitch, vexKey, display, onset, release|null }]
-// chords (derived): [{ onsetTime, releaseTime|null, notes: Map(pitch -> {vexKey, display}) }]
+// notesPlayed: raw performance, [{ pitch, vexKey, display, velocity, onset, release|null }]
+// chords (derived): [{ onsetTime, releaseTime|null, notes: Map(pitch -> {vexKey, display, velocity}) }]
 // events (derived): { treble: [vexKeys], bass: [vexKeys], beats, rawBeats }; both empty = rest
 let notesPlayed = [];
 let chords = [];
@@ -100,10 +100,12 @@ function beatsLabel(beats) {
 function splitChordByClef(notesMap) {
   const treble = [];
   const bass = [];
+  const velocities = {};
   for (const [pitch, info] of notesMap.entries()) {
     (pitch >= 60 ? treble : bass).push(info.vexKey);
+    velocities[info.vexKey] = info.velocity ?? 100;
   }
-  return { treble, bass };
+  return { treble, bass, velocities };
 }
 
 function timingLabel(rawBeats, beats) {
@@ -133,9 +135,9 @@ function groupChords(notes) {
     );
     if (joins) {
       group.list.push(note);
-      group.notes.set(note.pitch, { vexKey: note.vexKey, display: note.display });
+      group.notes.set(note.pitch, { vexKey: note.vexKey, display: note.display, velocity: note.velocity });
     } else {
-      group = { onsetTime: note.onset, list: [note], notes: new Map([[note.pitch, { vexKey: note.vexKey, display: note.display }]]) };
+      group = { onsetTime: note.onset, list: [note], notes: new Map([[note.pitch, { vexKey: note.vexKey, display: note.display, velocity: note.velocity }]]) };
       groups.push(group);
     }
   }
@@ -193,10 +195,10 @@ function buildEvents(chordList) {
   }
   const out = [];
   chordList.forEach((chord, i) => {
-    const { treble, bass } = splitChordByClef(chord.notes);
+    const { treble, bass, velocities } = splitChordByClef(chord.notes);
     const raw = raws[i];
     const beats = beatsFor[i];
-    out.push({ treble, bass, beats, rawBeats: raw.note, chordIndex: i });
+    out.push({ treble, bass, velocities, beats, rawBeats: raw.note, chordIndex: i });
     if (raw.rest) {
       const restRaw = raw.rest - beats;
       const restBeats = quantizeRestBeats(restRaw);
@@ -231,12 +233,12 @@ function requantize() {
   render();
 }
 
-function onNoteOn(pitch) {
+function onNoteOn(pitch, velocity) {
   const now = performance.now();
   const { vexKey, display } = midiToKey(pitch);
   const stillHeld = heldNotes.get(pitch);
   if (stillHeld) stillHeld.release = now;
-  const note = { pitch, vexKey, display, onset: now, release: null };
+  const note = { pitch, vexKey, display, velocity, onset: now, release: null };
   notesPlayed.push(note);
   heldNotes.set(pitch, note);
   if (autoTempoToggle.checked) applyAutoTempo();
@@ -600,7 +602,7 @@ function attachInput(input) {
     const command = status & 0xf0;
     if (command === 0x90 && data2 > 0) {
       liveNoteOn(data1, data2);
-      onNoteOn(data1);
+      onNoteOn(data1, data2);
     } else if (command === 0x80 || (command === 0x90 && data2 === 0)) {
       liveNoteOff(data1);
       onNoteOff(data1);
@@ -699,7 +701,7 @@ function liveNoteOn(pitch, velocity) {
   const source = audioCtx.createBufferSource();
   const gain = audioCtx.createGain();
   source.buffer = buffer;
-  gain.gain.value = Math.pow(velocity / 127, 1.5);
+  gain.gain.value = velocityGain(velocity);
   source.connect(gain).connect(audioCtx.destination);
   source.start();
   liveVoices.set(pitch, { source, gain });
@@ -717,12 +719,17 @@ function liveNoteOff(pitch) {
 
 const RELEASE_SEC = 0.25;
 
-function scheduleSample(ctx, buffer, startAt, durationSec) {
+function velocityGain(velocity) {
+  return Math.pow(velocity / 127, 1.5);
+}
+
+function scheduleSample(ctx, buffer, startAt, durationSec, velocity = 100) {
   const source = ctx.createBufferSource();
   const gain = ctx.createGain();
   source.buffer = buffer;
-  gain.gain.setValueAtTime(1, startAt);
-  gain.gain.setValueAtTime(1, startAt + durationSec);
+  const level = velocityGain(velocity);
+  gain.gain.setValueAtTime(level, startAt);
+  gain.gain.setValueAtTime(level, startAt + durationSec);
   gain.gain.exponentialRampToValueAtTime(0.001, startAt + durationSec + RELEASE_SEC);
   source.connect(gain).connect(ctx.destination);
   source.start(startAt);
@@ -746,7 +753,7 @@ function scheduleEvents(ctx, startAt) {
     onsets.push({ index, at: t });
     for (const key of [...ev.treble, ...ev.bass]) {
       const buffer = sampleCache.get(vexKeyToSampleName(key));
-      if (buffer) sources.push(scheduleSample(ctx, buffer, t, durationSec));
+      if (buffer) sources.push(scheduleSample(ctx, buffer, t, durationSec, ev.velocities?.[key]));
     }
     t += durationSec;
   });
@@ -894,6 +901,7 @@ document.getElementById('exportLog').addEventListener('click', () => {
     autoTempo: autoTempoToggle.checked,
     notes: notesPlayed.map((n) => ({
       note: n.display,
+      velocity: n.velocity,
       onset: Math.round(n.onset),
       release: n.release == null ? null : Math.round(n.release),
     })),
@@ -1005,7 +1013,8 @@ document.getElementById('exportMidi').addEventListener('click', () => {
         pendingWait.push(ticks);
         return;
       }
-      track.addEvent(new MidiWriter.NoteEvent({ pitch: keys.map(vexKeyToMidiWriterPitch), duration: ticks, wait: pendingWait }));
+      const velocity = Math.round(keys.reduce((s, k) => s + (ev.velocities?.[k] ?? 100), 0) / keys.length);
+      track.addEvent(new MidiWriter.NoteEvent({ pitch: keys.map(vexKeyToMidiWriterPitch), duration: ticks, wait: pendingWait, velocity: Math.round(velocity / 127 * 100) }));
       pendingWait = [];
     });
     return track;
