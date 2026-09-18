@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -e
+REPO_DIR="$HOME/.tlib/repos/knittingCat/midi-music-app"
+TARGET=$(find "$REPO_DIR" -maxdepth 2 -name server.js 2>/dev/null | head -1)
+if [ -z "$TARGET" ]; then
+  echo "midi-music-app: could not find server.js under $REPO_DIR" >&2
+  exit 1
+fi
+exec node "$TARGET" "$@"

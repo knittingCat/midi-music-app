@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tlib version="1">
+  <package name="midi-music-app" version="1.0.0">
+    <requires>
+      <tool name="node"/>
+      <tool name="npm"/>
+      <tool name="lsof"/>
+    </requires>
+    <commands>
+      <command name="midi-music-app" build="npm install" output="bin/midi-music-app"/>
+      <command name="midi-music-app-stop" language="shell" source="bin/midi-music-app-stop"/>
+    </commands>
+  </package>
+</tlib>

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -e
+PID=$(lsof -ti :3000 2>/dev/null || true)
+if [ -z "$PID" ]; then
+  echo "midi-music-app is not running on port 3000"
+  exit 0
+fi
+kill $PID
+echo "Stopped midi-music-app (pid $PID)"

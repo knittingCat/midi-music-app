@@ -2,14 +2,39 @@
 
 Plug in a MIDI keyboard, play, and watch your notes appear as sheet music on a grand staff in real time. Export the result as MusicXML (for MuseScore, Finale, Sibelius, etc.) or as a MIDI file.
 
-## Run
+## Install
+
+### With tlib
 
 ```bash
+tlib install knittingCat/midi-music-app
+```
+
+This installs `midi-music-app` and `midi-music-app-stop` as commands. See [BlueGrayFoo/TLIB](https://github.com/BlueGrayFoo/TLIB) for `tlib` itself.
+
+### Without tlib
+
+```bash
+git clone https://github.com/knittingCat/midi-music-app.git
+cd midi-music-app
 npm install
+```
+
+## Run
+
+With tlib:
+
+```bash
+midi-music-app
+```
+
+Without tlib, from inside the cloned repo:
+
+```bash
 npm start
 ```
 
-Open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported in Safari or Firefox). Allow MIDI access when prompted.
+Either way, open http://localhost:3000 in **Chrome or Edge** (Web MIDI is not supported in Safari or Firefox), allow MIDI access when prompted, and play. Stop the server with `midi-music-app-stop` (tlib) or Ctrl+C.
 
 ## How it works
 
