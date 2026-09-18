@@ -12,7 +12,7 @@ const CHORD_GAP_MS = 160;     // max gap between successive notes of a rolled ch
 const CHORD_HOLD_MS = 150;    // earlier chord notes must stay held this long after a new one
 const PAUSE_MS = 3000;
 const REST_MIN_BEATS = 0.5;
-const RUN_TOLERANCE = 1.35;   // intervals within this ratio of the run's average share its value
+const RUN_TOLERANCE = 1.5;    // intervals within this ratio of the run's average share its value
 const EPS = 1e-6;
 
 const NOTE_NAMES = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b'];
@@ -161,24 +161,41 @@ function chordRaw(chord, nextOnsetTime) {
   return { note: onsetToOnset, rest: 0, legato: true };
 }
 
-function buildEvents(chordList) {
-  const raws = chordList.map((c, i) => chordRaw(c, chordList[i + 1]?.onsetTime ?? null));
-  const out = [];
-  let run = null; // { sum, count, beats } for the current stretch of similarly spaced legato notes
-  chordList.forEach((chord, i) => {
-    const { treble, bass } = splitChordByClef(chord.notes);
-    const raw = raws[i];
-    const nextRaw = raws[i + 1]?.note ?? null;
-    let beats;
+// Group consecutive legato chords whose spacing stays within RUN_TOLERANCE of
+// the run's running average, so a slightly uneven trill or scale is one run.
+function findRuns(raws) {
+  const runs = [];
+  let run = null;
+  raws.forEach((raw, i) => {
     const inRun = run && raw.legato && Math.abs(Math.log2(raw.note / (run.sum / run.count))) < Math.log2(RUN_TOLERANCE);
     if (inRun) {
       run.sum += raw.note;
       run.count++;
-      beats = run.beats;
+      run.end = i;
     } else {
-      beats = quantizeNoteBeats(raw.note, nextRaw);
-      run = raw.legato ? { sum: raw.note, count: 1, beats } : null;
+      run = { start: i, end: i, sum: raw.note, count: 1 };
+      runs.push(run);
+      if (!raw.legato) run = null;
     }
+  });
+  return runs;
+}
+
+function buildEvents(chordList) {
+  const raws = chordList.map((c, i) => chordRaw(c, chordList[i + 1]?.onsetTime ?? null));
+  // Every chord in a run gets the value quantized from the run's average
+  // interval, not from whichever note happened to start it.
+  const beatsFor = new Array(raws.length);
+  for (const run of findRuns(raws)) {
+    const nextRaw = run.count === 1 ? raws[run.end + 1]?.note ?? null : null;
+    const beats = quantizeNoteBeats(run.sum / run.count, nextRaw);
+    for (let i = run.start; i <= run.end; i++) beatsFor[i] = beats;
+  }
+  const out = [];
+  chordList.forEach((chord, i) => {
+    const { treble, bass } = splitChordByClef(chord.notes);
+    const raw = raws[i];
+    const beats = beatsFor[i];
     out.push({ treble, bass, beats, rawBeats: raw.note, chordIndex: i });
     if (raw.rest) {
       const restRaw = raw.rest - beats;
