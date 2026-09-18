@@ -13,6 +13,8 @@ const CHORD_HOLD_MS = 150;    // earlier chord notes must stay held this long af
 const PAUSE_MS = 3000;
 const REST_MIN_BEATS = 0.5;
 const RUN_TOLERANCE = 1.5;    // intervals within this ratio of the run's average share its value
+const TRIPLET_VALUES = [1 / 3, 2 / 3]; // eighth-note and quarter-note triplets
+const TRIPLET_BIAS = 0.05;    // log2 margin a triplet fit must beat the straight fit by
 const EPS = 1e-6;
 
 const NOTE_NAMES = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#', 'b'];
@@ -32,7 +34,7 @@ const MAX_BEATS = 4;
 
 // notesPlayed: raw performance, [{ pitch, vexKey, display, velocity, onset, release|null }]
 // chords (derived): [{ onsetTime, releaseTime|null, notes: Map(pitch -> {vexKey, display, velocity}) }]
-// events (derived): { treble: [vexKeys], bass: [vexKeys], beats, rawBeats }; both empty = rest
+// events (derived): { treble: [vexKeys], bass: [vexKeys], beats, rawBeats, tupletId? }; both empty = rest
 let notesPlayed = [];
 let chords = [];
 let events = [];
@@ -93,7 +95,12 @@ function decomposeBeats(beats) {
   return parts;
 }
 
-function beatsLabel(beats) {
+function tripletCode(beats) {
+  return beats < 0.5 ? '8' : 'q';
+}
+
+function beatsLabel(beats, triplet = false) {
+  if (triplet) return tripletCode(beats) + 't';
   return decomposeBeats(beats).map((d) => d.code + (d.dotted ? '.' : '')).join('+');
 }
 
@@ -108,10 +115,10 @@ function splitChordByClef(notesMap) {
   return { treble, bass, velocities };
 }
 
-function timingLabel(rawBeats, beats) {
+function timingLabel(rawBeats, beats, triplet = false) {
   const diff = beats - rawBeats;
   const sign = diff >= 0 ? '+' : '';
-  return `played ${(rawBeats * quarterMs()).toFixed(0)}ms = ${rawBeats.toFixed(2)} beats → ${beatsLabel(beats)} (${beats} beats, ${sign}${diff.toFixed(2)})`;
+  return `played ${(rawBeats * quarterMs()).toFixed(0)}ms = ${rawBeats.toFixed(2)} beats → ${beatsLabel(beats, triplet)} (${beats.toFixed(2)} beats, ${sign}${diff.toFixed(2)})`;
 }
 
 // ---------- Chord grouping ----------
@@ -183,26 +190,67 @@ function findRuns(raws) {
   return runs;
 }
 
+// Decide the value of every chord in a run. A run of three or more notes whose
+// average spacing fits a triplet better than a straight value becomes triplet
+// groups of three, as long as each group fits inside the current measure.
+// Leftover notes (and groups that would cross a barline) get the straight value.
+function planRun(run, raws, pos) {
+  const avg = run.sum / run.count;
+  const nextRaw = run.count === 1 ? raws[run.end + 1]?.note ?? null : null;
+  const straight = quantizeNoteBeats(avg, nextRaw);
+  const plan = new Array(run.count).fill(null).map(() => ({ beats: straight }));
+  if (run.count < 3) return plan;
+
+  const tri = nearestBeats(avg, TRIPLET_VALUES);
+  const dStraight = Math.abs(Math.log2(avg / straight));
+  const dTri = Math.abs(Math.log2(avg / tri));
+  if (dTri + TRIPLET_BIAS >= dStraight) return plan;
+
+  const capacity = timeSigBeatsInQuarters();
+  const groupBeats = tri * 3;
+  const plain = nearestBeats(avg, NOTE_VALUES.filter((b) => b !== 0.75));
+  let p = pos;
+  for (let i = 0; i < run.count; i++) plan[i] = { beats: plain };
+  for (let i = 0; i + 3 <= run.count; i += 3) {
+    const inMeasure = p - Math.floor(p / capacity + EPS) * capacity;
+    if (inMeasure + groupBeats <= capacity + EPS) {
+      const tupletId = nextTupletId++;
+      for (let k = 0; k < 3; k++) plan[i + k] = { beats: tri, tupletId };
+      p += groupBeats;
+    } else {
+      p += plain * 3;
+    }
+  }
+  return plan;
+}
+
+let nextTupletId = 0;
+
 function buildEvents(chordList) {
   const raws = chordList.map((c, i) => chordRaw(c, chordList[i + 1]?.onsetTime ?? null));
-  // Every chord in a run gets the value quantized from the run's average
-  // interval, not from whichever note happened to start it.
-  const beatsFor = new Array(raws.length);
-  for (const run of findRuns(raws)) {
-    const nextRaw = run.count === 1 ? raws[run.end + 1]?.note ?? null : null;
-    const beats = quantizeNoteBeats(run.sum / run.count, nextRaw);
-    for (let i = run.start; i <= run.end; i++) beatsFor[i] = beats;
-  }
+  nextTupletId = 0;
+  const planFor = new Array(raws.length);
+  const runs = findRuns(raws);
   const out = [];
+  let pos = 0; // beats since the start, to keep triplet groups inside a measure
+  let runIdx = 0;
   chordList.forEach((chord, i) => {
+    if (runIdx < runs.length && runs[runIdx].start === i) {
+      const run = runs[runIdx++];
+      planRun(run, raws, pos).forEach((pl, k) => { planFor[run.start + k] = pl; });
+    }
     const { treble, bass, velocities } = splitChordByClef(chord.notes);
     const raw = raws[i];
-    const beats = beatsFor[i];
-    out.push({ treble, bass, velocities, beats, rawBeats: raw.note, chordIndex: i });
+    const { beats, tupletId } = planFor[i];
+    out.push({ treble, bass, velocities, beats, tupletId, rawBeats: raw.note, chordIndex: i });
+    pos += beats;
     if (raw.rest) {
       const restRaw = raw.rest - beats;
       const restBeats = quantizeRestBeats(restRaw);
-      if (restBeats >= MIN_BEATS - EPS) out.push({ treble: [], bass: [], beats: restBeats, rawBeats: restRaw, chordIndex: i });
+      if (restBeats >= MIN_BEATS - EPS) {
+        out.push({ treble: [], bass: [], beats: restBeats, rawBeats: restRaw, chordIndex: i });
+        pos += restBeats;
+      }
     }
   });
   return out;
@@ -222,7 +270,7 @@ function logNewChords(complete) {
     const names = [...chord.notes.values()].map((n) => n.display).join(' ');
     for (const ev of events.filter((e) => e.chordIndex === i)) {
       const isRest = ev.treble.length === 0 && ev.bass.length === 0;
-      log(`${isRest ? 'Rest' : names}: ${timingLabel(ev.rawBeats, ev.beats)}`);
+      log(`${isRest ? 'Rest' : names}: ${timingLabel(ev.rawBeats, ev.beats, ev.tupletId != null)}`);
     }
   }
   loggedChords = Math.max(loggedChords, closed);
@@ -393,7 +441,7 @@ function timeSigBeatsInQuarters() {
   return num * (4 / den);
 }
 
-// slot: { treble, bass, code, dotted, tieToNext }
+// slot: { treble, bass, code, dotted, tieToNext, tupletId? }
 function groupIntoMeasures() {
   const capacity = timeSigBeatsInQuarters();
   const measures = [];
@@ -402,6 +450,17 @@ function groupIntoMeasures() {
 
   events.forEach((ev, eventIndex) => {
     const isRest = ev.treble.length === 0 && ev.bass.length === 0;
+    if (ev.tupletId != null) {
+      // buildEvents keeps triplet groups inside one measure, so no splitting here.
+      current.push({ treble: ev.treble, bass: ev.bass, code: tripletCode(ev.beats), dotted: false, tieToNext: false, tupletId: ev.tupletId, eventIndex });
+      acc += ev.beats;
+      if (acc >= capacity - EPS) {
+        measures.push(current);
+        current = [];
+        acc = 0;
+      }
+      return;
+    }
     let remaining = ev.beats;
     while (remaining > EPS) {
       const chunk = Math.min(remaining, capacity - acc);
@@ -426,16 +485,46 @@ function groupIntoMeasures() {
 
 // ---------- Rendering ----------
 
+// Returns one entry per slot. A triplet group that is silent on this clef
+// collapses to a single plain rest, shared by all three of its slots.
 function buildStaveNotes(slots, clef) {
-  return slots.map((slot) => {
+  const restKey = clef === 'treble' ? 'b/4' : 'd/3';
+  const collapsed = new Map(); // tupletId -> shared rest note
+  return slots.map((slot, i) => {
     const keys = slot[clef];
+    if (slot.tupletId != null && keys.length === 0) {
+      const group = slots.filter((sl) => sl.tupletId === slot.tupletId);
+      if (group.every((sl) => sl[clef].length === 0)) {
+        if (!collapsed.has(slot.tupletId)) {
+          collapsed.set(slot.tupletId, new VF.StaveNote({ keys: [restKey], duration: (slot.code === '8' ? 'q' : 'h') + 'r', clef }));
+        }
+        return collapsed.get(slot.tupletId);
+      }
+    }
     const duration = slot.code + (slot.dotted ? 'd' : '');
     const note = keys.length === 0
-      ? new VF.StaveNote({ keys: [clef === 'treble' ? 'b/4' : 'd/3'], duration: duration + 'r', clef })
+      ? new VF.StaveNote({ keys: [restKey], duration: duration + 'r', clef })
       : new VF.StaveNote({ keys, duration, clef });
     if (slot.dotted) VF.Dot.buildAndAttach([note], { all: true });
     return note;
   });
+}
+
+function uniqueNotes(staveNotes) {
+  return [...new Set(staveNotes)];
+}
+
+// Slots sharing a tupletId are always three consecutive slots of one measure.
+function buildTuplets(slots, staveNotes) {
+  const groups = new Map();
+  slots.forEach((slot, i) => {
+    if (slot.tupletId == null) return;
+    if (!groups.has(slot.tupletId)) groups.set(slot.tupletId, []);
+    groups.get(slot.tupletId).push(staveNotes[i]);
+  });
+  return [...groups.values()]
+    .filter((notes) => uniqueNotes(notes).length === notes.length) // skip collapsed rest groups
+    .map((notes) => new VF.Tuplet(notes, { numNotes: 3, notesOccupied: 2 }));
 }
 
 function layoutMeasures(measures, rowMaxWidth) {
@@ -504,13 +593,18 @@ function render(rowMaxWidth) {
         treble: buildStaveNotes(m.slots, 'treble'),
         bass: buildStaveNotes(m.slots, 'bass'),
       };
+      const tuplets = {
+        treble: buildTuplets(m.slots, notes.treble),
+        bass: buildTuplets(m.slots, notes.bass),
+      };
+      const tickables = { treble: uniqueNotes(notes.treble), bass: uniqueNotes(notes.bass) };
       const beams = {
-        treble: VF.Beam.generateBeams(notes.treble),
-        bass: VF.Beam.generateBeams(notes.bass),
+        treble: VF.Beam.generateBeams(tickables.treble),
+        bass: VF.Beam.generateBeams(tickables.bass),
       };
       const voices = {
-        treble: new VF.Voice({ numBeats: num, beatValue: den }).setStrict(false).addTickables(notes.treble),
-        bass: new VF.Voice({ numBeats: num, beatValue: den }).setStrict(false).addTickables(notes.bass),
+        treble: new VF.Voice({ numBeats: num, beatValue: den }).setStrict(false).addTickables(tickables.treble),
+        bass: new VF.Voice({ numBeats: num, beatValue: den }).setStrict(false).addTickables(tickables.bass),
       };
 
       new VF.Formatter().joinVoices([voices.treble]).joinVoices([voices.bass]).formatToStave([voices.treble, voices.bass], trebleStave);
@@ -518,6 +612,8 @@ function render(rowMaxWidth) {
       voices.bass.draw(ctx, bassStave);
       beams.treble.forEach((b) => b.setContext(ctx).draw());
       beams.bass.forEach((b) => b.setContext(ctx).draw());
+      tuplets.treble.forEach((t) => t.setContext(ctx).draw());
+      tuplets.bass.forEach((t) => t.setContext(ctx).draw());
 
       m.slots.forEach((slot, i) => {
         (noteElements[slot.eventIndex] ||= []).push(notes.treble[i].getSVGElement(), notes.bass[i].getSVGElement());
@@ -813,12 +909,12 @@ playBtn.addEventListener('click', () => {
 
 // ---------- Export: MusicXML ----------
 
-const XML_DIVISIONS = 8;
+const XML_DIVISIONS = 24; // divisible by 8 (16ths, dotted 16ths) and 3 (triplets)
 const XML_TYPES = { w: 'whole', h: 'half', q: 'quarter', 8: 'eighth', 16: '16th' };
 
 function slotDivisions(slot) {
   const base = DURATIONS.find((d) => d.code === slot.code && !d.dotted).beats;
-  return Math.round(base * (slot.dotted ? 1.5 : 1) * XML_DIVISIONS);
+  return Math.round(base * (slot.dotted ? 1.5 : 1) * (slot.tupletId != null ? 2 / 3 : 1) * XML_DIVISIONS);
 }
 
 function vexKeyToPitch(vexKey) {
@@ -840,24 +936,28 @@ function buildMusicXml() {
 
     ['treble', 'bass'].forEach((clef, clefIdx) => {
       const staffNum = clefIdx + 1;
-      slots.forEach((slot) => {
+      slots.forEach((slot, si) => {
         const keys = slot[clef];
         const type = XML_TYPES[slot.code];
         const dur = slotDivisions(slot);
         const dot = slot.dotted ? '<dot/>' : '';
+        const inTuplet = slot.tupletId != null;
+        const timeMod = inTuplet ? '<time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification>' : '';
+        const tupletStart = inTuplet && slots[si - 1]?.tupletId !== slot.tupletId;
+        const tupletStop = inTuplet && slots[si + 1]?.tupletId !== slot.tupletId;
+        const tupletTags = (tupletStart ? '<tuplet type="start"/>' : '') + (tupletStop ? '<tuplet type="stop"/>' : '');
         if (keys.length === 0) {
-          noteXml += `<note><rest/><duration>${dur}</duration><voice>${staffNum}</voice><type>${type}</type>${dot}<staff>${staffNum}</staff></note>`;
+          noteXml += `<note><rest/><duration>${dur}</duration><voice>${staffNum}</voice><type>${type}</type>${dot}${timeMod}<staff>${staffNum}</staff>${tupletTags ? `<notations>${tupletTags}</notations>` : ''}</note>`;
           return;
         }
         const tieStop = tieOpen[clef];
         const tieStart = slot.tieToNext;
         const tieTags = (tieStop ? '<tie type="stop"/>' : '') + (tieStart ? '<tie type="start"/>' : '');
-        const tiedTags = (tieStop || tieStart)
-          ? `<notations>${tieStop ? '<tied type="stop"/>' : ''}${tieStart ? '<tied type="start"/>' : ''}</notations>`
-          : '';
+        const tiedTags = (tieStop ? '<tied type="stop"/>' : '') + (tieStart ? '<tied type="start"/>' : '');
         keys.forEach((k, idx) => {
           const { step, alter, octave } = vexKeyToPitch(k);
-          noteXml += `<note>${idx > 0 ? '<chord/>' : ''}<pitch><step>${step}</step>${alter ? `<alter>${alter}</alter>` : ''}<octave>${octave}</octave></pitch><duration>${dur}</duration>${tieTags}<voice>${staffNum}</voice><type>${type}</type>${dot}<staff>${staffNum}</staff>${tiedTags}</note>`;
+          const notations = tiedTags + (idx === 0 ? tupletTags : '');
+          noteXml += `<note>${idx > 0 ? '<chord/>' : ''}<pitch><step>${step}</step>${alter ? `<alter>${alter}</alter>` : ''}<octave>${octave}</octave></pitch><duration>${dur}</duration>${tieTags}<voice>${staffNum}</voice><type>${type}</type>${dot}${timeMod}<staff>${staffNum}</staff>${notations ? `<notations>${notations}</notations>` : ''}</note>`;
         });
         tieOpen[clef] = tieStart;
       });
@@ -1006,8 +1106,11 @@ document.getElementById('exportMidi').addEventListener('click', () => {
     const track = new MidiWriter.Track();
     track.setTempo(tempo);
     let pendingWait = [];
+    let cursor = 0; // beats; ticks are rounded from cumulative position so triplets don't drift
     events.forEach((ev) => {
-      const ticks = 'T' + Math.round(ev.beats * MIDI_TICKS_PER_QUARTER);
+      const startTick = Math.round(cursor * MIDI_TICKS_PER_QUARTER);
+      cursor += ev.beats;
+      const ticks = 'T' + (Math.round(cursor * MIDI_TICKS_PER_QUARTER) - startTick);
       const keys = ev[clef];
       if (keys.length === 0) {
         pendingWait.push(ticks);
