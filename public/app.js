@@ -768,9 +768,15 @@ function drawRow(row, incomingTie) {
     tuplets.treble.forEach((t) => t.setContext(ctx).draw());
     tuplets.bass.forEach((t) => t.setContext(ctx).draw());
 
+    // The row's <svg> is not in the document yet, so VexFlow's
+    // getSVGElement() (a document.getElementById lookup) would find nothing.
+    // Query the detached svg by the same id instead.
     m.slots.forEach((slot, i) => {
       if (!rowNoteElements.has(slot.eventIndex)) rowNoteElements.set(slot.eventIndex, []);
-      rowNoteElements.get(slot.eventIndex).push(notes.treble[i].getSVGElement(), notes.bass[i].getSVGElement());
+      for (const note of [notes.treble[i], notes.bass[i]]) {
+        const el = svg.querySelector(`#vf-${note.getAttribute('id')}`);
+        if (el) rowNoteElements.get(slot.eventIndex).push(el);
+      }
     });
 
     ['treble', 'bass'].forEach((clef) => {
