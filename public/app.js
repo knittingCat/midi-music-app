@@ -711,17 +711,51 @@ function render(rowMaxWidth) {
   rowCache = nextCache;
 }
 
+function rowWidth(row) {
+  return row.reduce((s, m) => s + m.width, 0) + 40;
+}
+
 // Draws one row into a fresh <svg>; returns { svg, noteElements: Map(eventIndex -> [elements]) }
 function drawRow(row, incomingTie) {
   const holder = document.createElement('div');
   const renderer = new VF.Renderer(holder, VF.Renderer.Backends.SVG);
-  renderer.resize(row.reduce((s, m) => s + m.width, 0) + 40, ROW_HEIGHT);
+  renderer.resize(rowWidth(row), ROW_HEIGHT);
   const svg = holder.querySelector('svg');
   svg.style.display = 'block';
   svg.style.overflow = 'visible';
-  const ctx = renderer.getContext();
-  const [num, den] = timeSigSelect.value.split('/').map(Number);
   const rowNoteElements = new Map();
+  drawRowWith(renderer.getContext(), row, incomingTie, (slot, staveNotes) => {
+    // The row's <svg> is not in the document yet, so VexFlow's
+    // getSVGElement() (a document.getElementById lookup) would find nothing.
+    // Query the detached svg by the same id instead.
+    if (!rowNoteElements.has(slot.eventIndex)) rowNoteElements.set(slot.eventIndex, []);
+    for (const note of staveNotes) {
+      const el = svg.querySelector(`#vf-${note.getAttribute('id')}`);
+      if (el) rowNoteElements.get(slot.eventIndex).push(el);
+    }
+  });
+  return { svg, noteElements: rowNoteElements };
+}
+
+// Draws one row into a canvas at `scale` device pixels per layout pixel.
+function drawRowToCanvas(row, incomingTie, scale) {
+  const canvas = document.createElement('canvas');
+  const renderer = new VF.Renderer(canvas, VF.Renderer.Backends.CANVAS);
+  const width = rowWidth(row);
+  renderer.resize(width * scale, ROW_HEIGHT * scale);
+  const ctx = renderer.getContext();
+  ctx.scale(scale, scale);
+  ctx.setFillStyle('#fff');
+  ctx.fillRect(0, 0, width, ROW_HEIGHT);
+  ctx.setFillStyle('#000');
+  drawRowWith(ctx, row, incomingTie, () => {});
+  return canvas;
+}
+
+// VexFlow drawing shared by the SVG and canvas paths. onSlot(slot, [trebleNote, bassNote])
+// is called for every slot once its notes are drawn.
+function drawRowWith(ctx, row, incomingTie, onSlot) {
+  const [num, den] = timeSigSelect.value.split('/').map(Number);
   const pendingTie = { ...incomingTie };
   let x = 20;
   const y = 20;
@@ -768,16 +802,7 @@ function drawRow(row, incomingTie) {
     tuplets.treble.forEach((t) => t.setContext(ctx).draw());
     tuplets.bass.forEach((t) => t.setContext(ctx).draw());
 
-    // The row's <svg> is not in the document yet, so VexFlow's
-    // getSVGElement() (a document.getElementById lookup) would find nothing.
-    // Query the detached svg by the same id instead.
-    m.slots.forEach((slot, i) => {
-      if (!rowNoteElements.has(slot.eventIndex)) rowNoteElements.set(slot.eventIndex, []);
-      for (const note of [notes.treble[i], notes.bass[i]]) {
-        const el = svg.querySelector(`#vf-${note.getAttribute('id')}`);
-        if (el) rowNoteElements.get(slot.eventIndex).push(el);
-      }
-    });
+    m.slots.forEach((slot, i) => onSlot(slot, [notes.treble[i], notes.bass[i]]));
 
     ['treble', 'bass'].forEach((clef) => {
       m.slots.forEach((slot, i) => {
@@ -800,8 +825,6 @@ function drawRow(row, incomingTie) {
 
     x += m.width;
   });
-
-  return { svg, noteElements: rowNoteElements };
 }
 
 // ---------- Tap tempo ----------
@@ -1188,9 +1211,10 @@ function vexKeyToMidiWriterPitch(vexKey) {
   return `${name.toUpperCase()}${octave}`;
 }
 
-// ---------- Export: PDF (via print) ----------
+// ---------- Export: PDF ----------
 
 const PRINT_ROW_WIDTH = 720;
+const PDF_PAGE = { width: 612, height: 792, margin: 36 }; // US Letter, points
 
 let resizeTimer = null;
 window.addEventListener('resize', () => {
@@ -1201,10 +1225,49 @@ window.addEventListener('resize', () => {
 window.addEventListener('beforeprint', () => render(PRINT_ROW_WIDTH));
 window.addEventListener('afterprint', () => render());
 
-document.getElementById('exportPdf').addEventListener('click', () => {
+// Lays the score out at print width, draws each row to a high-resolution
+// canvas (VexFlow's music font is a web font, which only the canvas path can
+// use), and paginates the rows down US Letter pages.
+const PDF_PIXELS_PER_POINT = 3; // ~216 dpi
+function buildPdf() {
+  const rows = layoutMeasures(groupIntoMeasures(), PRINT_ROW_WIDTH);
+  const doc = new jspdf.jsPDF({ unit: 'pt', format: 'letter' });
+  const usable = PDF_PAGE.width - 2 * PDF_PAGE.margin;
+  const width = Math.max(...rows.map(rowWidth));
+  const ptPerPx = usable / width;
+  const rowHeightPt = ROW_HEIGHT * ptPerPx;
+  const scale = ptPerPx * PDF_PIXELS_PER_POINT / (window.devicePixelRatio || 1);
+  const incomingTie = { treble: false, bass: false };
+  let y = PDF_PAGE.margin;
+  rows.forEach((row) => {
+    if (y + rowHeightPt > PDF_PAGE.height - PDF_PAGE.margin) {
+      doc.addPage();
+      y = PDF_PAGE.margin;
+    }
+    const canvas = drawRowToCanvas(row, incomingTie, scale);
+    // JPEG is embedded as-is; PNG would be decoded and re-deflated by jsPDF (slow, huge)
+    doc.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', PDF_PAGE.margin, y, rowWidth(row) * ptPerPx, rowHeightPt);
+    y += rowHeightPt;
+    const last = row[row.length - 1].slots.at(-1);
+    incomingTie.treble = last.tieToNext && last.treble.length > 0;
+    incomingTie.bass = last.tieToNext && last.bass.length > 0;
+  });
+  return doc;
+}
+
+const exportPdfBtn = document.getElementById('exportPdf');
+exportPdfBtn.addEventListener('click', async () => {
   if (events.length === 0) { log('Nothing to export yet.'); return; }
-  log('Choose "Save as PDF" as the destination in the print dialog.');
-  window.print();
+  exportPdfBtn.disabled = true;
+  try {
+    const doc = buildPdf();
+    doc.save('transcription.pdf');
+    log('Exported PDF.');
+  } catch (err) {
+    log(`PDF export failed: ${err.message}`);
+  } finally {
+    exportPdfBtn.disabled = false;
+  }
 });
 
 // ---------- Export: MP3 ----------

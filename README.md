@@ -64,7 +64,7 @@ Then open http://localhost:3000 (or the hosted URL above) in **Chrome or Edge** 
 | Clear | Start a new session |
 | Save as MusicXML | Score file for MuseScore, Finale, Sibelius, Dorico, etc. |
 | Save as MIDI | Two-track (treble / bass) standard MIDI file |
-| Save as PDF | Opens the print dialog with the score laid out for the page; choose "Save as PDF" |
+| Save as PDF | Downloads the score as a US Letter PDF (rendered in the browser; the browser's own Print still works too) |
 | Save as MP3 | Renders the playback with the piano samples and encodes it in the browser |
 
 ## How it works
@@ -87,4 +87,5 @@ Libraries are vendored in `public/vendor/` (refresh them from `node_modules` wit
 - Notation: [VexFlow](https://github.com/vexflow/vexflow) (MIT)
 - MIDI file writing: [midi-writer-js](https://github.com/grimmdude/MidiWriterJS) (MIT)
 - MP3 encoding: [lamejs](https://github.com/zhuker/lamejs) (LGPL-3.0)
+- PDF writing: [jsPDF](https://github.com/parallax/jsPDF) (MIT)
 - Piano samples: FluidR3_GM acoustic grand piano from [gleitz/midi-js-soundfonts](https://github.com/gleitz/midi-js-soundfonts) (MIT), vendored in `public/vendor/` so the app works offline
